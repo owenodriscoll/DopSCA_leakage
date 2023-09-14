@@ -1,0 +1,14 @@
+
+in 1D along track
+- Model antenna pattern (like a weighting function)
+- Calculate geometrical Doppler for beam footprint (satellite and Earth motion)
+    - Doppler centroid with zero-Doppler exactly down slant range
+    - Doppler of angle within beam 
+
+What happens when backscatter along track is correlated through air-sea phenomena?
+Will the Doppler cancel out like when a normal distribution of scattering is considered?
+
+Move to 2D?
+
+Quantify additional Doppler uncertainty as a result of this interaction between:
+    - geometry doppler, beam pattern and surface patterns 
