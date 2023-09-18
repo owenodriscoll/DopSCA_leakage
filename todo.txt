@@ -12,3 +12,12 @@ Move to 2D?
 
 Quantify additional Doppler uncertainty as a result of this interaction between:
     - geometry doppler, beam pattern and surface patterns 
+
+
+
+TO DO:
+    - Find error margins in geometrical Doppler 
+        - if there is 5% error it might exceed geophysical signal
+    - Find how to represent variations w.r.t. average  wind-wave interaction fields as wave spectrum
+    - Find if DopRIM can represent these varying wave fields
+    -
