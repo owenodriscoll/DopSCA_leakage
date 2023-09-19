@@ -1,14 +1,12 @@
 
 in 1D along track
 - Model antenna pattern (like a weighting function)
-- Calculate geometrical Doppler for beam footprint (satellite and Earth motion)
-    - Doppler centroid with zero-Doppler exactly down slant range
-    - Doppler of angle within beam 
+- Calculate geometrical Doppler for beam footprint
+- Calculate geophysical Doppler (DopRIM)
 
 What happens when backscatter along track is correlated through air-sea phenomena?
 Will the Doppler cancel out like when a normal distribution of scattering is considered?
 
-Move to 2D?
 
 Quantify additional Doppler uncertainty as a result of this interaction between:
     - geometry doppler, beam pattern and surface patterns 
@@ -16,8 +14,18 @@ Quantify additional Doppler uncertainty as a result of this interaction between:
 
 
 TO DO:
+    - Find more realistic beam pattern
     - Find error margins in geometrical Doppler 
-        - if there is 5% error it might exceed geophysical signal
+        - If there is 5% error it might exceed geophysical signal
     - Find how to represent variations w.r.t. average  wind-wave interaction fields as wave spectrum
     - Find if DopRIM can represent these varying wave fields
-    -
+    - How to infer Doppler field of unstable fields (or any field with large structures) 
+
+
+TO DO code:
+    - Include non-rectilinear geometry
+    - Include earth's rotation
+
+
+IDEAS:
+- Use CDOP to convert backscatter fields to Doppler to estimate distribution of doppler from range of scenes
