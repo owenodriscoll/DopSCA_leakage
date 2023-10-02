@@ -2,6 +2,8 @@ import numpy as np
 from stereoid.oceans.forward_models.Doppler import DopRIM2023_DP
 from stereoid.oceans.forward_models.backscatter import backscatter_Kudry2023
 from stereoid.oceans.waves.wave_spectra import Kudry_spec
+from stereoid.oceans.GMF.cdop import cdop
+
 #%%
 # wavelengths and wave numbers
 g=9.81
@@ -62,6 +64,8 @@ def Doppler_inc(inc, phi_w, k_r, u_10, fetch):
     rat=[0, 
         sigma_los[-1]/np.sum(sigma_los[1] + sigma_los[-1]),
         sigma_los[1]/np.sum(sigma_los[1] + sigma_los[-1])]
+    
+    sigma_los_VV = np.sum(sigma_los[:2] + sigma_los[-1])
 
     # calculate velocity of scattering facets
     c_sp_bar, c_wb_bar, c_br_bar, c_sp, c_wb, c_br_vv, c_br_hh=DopRIM2023_DP(S, k_x, k_y, dks, obs_geo.inc_m, u_10, phi_w, k_r=k_r)
@@ -72,4 +76,4 @@ def Doppler_inc(inc, phi_w, k_r, u_10, fetch):
         rat[2] * (c_wb_bar + c_wb) 
     
 
-    return V#, c_sp_bar, c_wb_bar, c_br_bar, c_sp, c_wb, c_br_vv, c_br_hh
+    return V, sigma_los_VV#, c_sp_bar, c_wb_bar, c_br_bar, c_sp, c_wb, c_br_vv, c_br_hh

@@ -2,12 +2,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from beam_pattern import beam_pattern_oneway, azimuth_beamwidth
+from beam_pattern import beam_pattern_oneway, azimuth_beamwidth 
+from drama.performance.sar import sinc_bp
+
+# TODO check introduction of errors into sigma0 and doppler from radar model
+# TODO find beam pattern of Sentinel-1 (speckle and ruis)
 
 #%% 
 Lambda = 5.6e-2 # radio wavelength, m
 Vs = 6800 # velocity radar, m/s
-antenna_length = 10 # m
+antenna_length = 4 # m
 theta_squint = np.deg2rad(0) # squint angle
 footprint_az = 100e3 # azimuth footprint, m
 inc = np.deg2rad(37) # incidence angle, degrees
@@ -16,8 +20,7 @@ az_samples = 201 # samples along azimuth footprint
 
 #%% Simplified rectilinear geometry-induced Doppler with no Earth rotation
 # NOTE these equations assume a rectilinear geometry (parallel earth and flight path) 
-# NOTE we assume an along-track line on the surface with constant 0-Doppler range
-# NOTE we assume no squint
+# NOTE we assume an along-track line on the surface
 # NOTE we assume a idealized and unweighted in azimuth (?) beam pattern
 # NOTE we assume no beam mispoining
 
@@ -43,6 +46,18 @@ beam_pattern_twoway = beam_pattern_oneway(
         )**2 
 
 beam_patter_twoway_db = 10*np.log10(beam_pattern_twoway)
+#%% Compare drama beam pattern with custom one, both are identical sincs
+
+# f0 = 3e8/Lambda
+# sin_angle = np.sin(az_beamwidth - theta_squint)
+# beam_patter_twoway_drama =  sinc_bp(sin_angle,
+#                                     antenna_length,
+#                                     f0,)
+# plt.plot(ground_azimuth_distance, beam_pattern_twoway)
+# plt.plot(ground_azimuth_distance, sinc_bp(sin_angle,
+#     antenna_length,
+#     f0,))
+
 
 #%%
 fig, axes = plt.subplots(nrows=1, ncols=3, sharex=True, sharey=False, figsize=(15, 5))
@@ -68,6 +83,8 @@ fig.tight_layout()
 
 # %% Geophysical Dopplers
 from surface_doppler import Doppler_inc
+from importlib import reload
+import surface_doppler; reload(surface_doppler); from surface_doppler import Doppler_inc
 
 # NOTE we assume points off the Doppler centroid can be modeled with a slightly different incidence angle
 # NOTE we still assume a flat Earth and rectilinear path
@@ -82,37 +99,57 @@ u_10 = 5 # mean wind speed, m/s
 fetch = 10e5 # fetch length for the non-equilibrium part of the spectrum, m
 
 Doppler_v_VV = np.empty(len(inc_effective)) 
+sigma_lod_VV = np.empty(len(inc_effective)) 
 for i, (inc_e, phi_w_e) in enumerate(tqdm(zip(inc_effective, phi_w_effective))):
-    Doppler_v_VV[i] = Doppler_inc(inc = inc_e, 
+    Doppler_v_VV[i], sigma_lod_VV[i]  = Doppler_inc(inc = inc_e, 
                                   phi_w = phi_w_e, 
                                   k_r = k_r,
                                   u_10 = u_10, 
                                   fetch = fetch)
 
 f_Dop_geo = -2 / Lambda * Doppler_v_VV * np.sin(inc_effective) # convert to LOS velocity and geophysical Doppler
-
+backscatter_weight =  (sigma_lod_VV/np.sum(sigma_lod_VV)) / np.max((sigma_lod_VV/np.sum(sigma_lod_VV)))
 #%%
 
-fig, axes = plt.subplots(nrows=1, ncols=3, sharex=True, sharey=False, figsize=(15, 5))
-ax0 = axes[0]
+fig, axes = plt.subplots(nrows=2, ncols=3, sharex=False, sharey=False, figsize=(15, 8))
+ax0 = axes[0,0]
 ax0.plot(ground_azimuth_distance, f_Dop_geo)
 ax0.set_title("Geophysical Doppler")
-ax0.set_ylabel("Geometrical Doppler [Hz]")
+ax0.set_ylabel("Doppler [Hz]")
 ax0.set_xlabel("Along track distance [m]")
 
-ax1 = axes[1]
-ax1.plot(ground_azimuth_distance, f_Dop_geo * beam_pattern_twoway)
-ax1.set_title("Beam-pattern weighted geophysical Doppler")
-ax1.set_ylabel("Geometrical Doppler [Hz]")
+ax1 = axes[0,1]
+ax1.plot(ground_azimuth_distance, f_Dop_geom)
+ax1.set_title("Geometrical Doppler")
+ax1.set_ylabel("Doppler [Hz]")
 ax1.set_xlabel("Along track distance [m]")
 
-ax2 = axes[2]
-ax2.plot(ground_azimuth_distance, (f_Dop_geo + f_Dop_geom) * beam_pattern_twoway)
-ax2.set_title("Beam-pattern weighted Doppler")
-ax2.set_ylabel("Geometrical Doppler [Hz]")
+ax2 = axes[0,2]
+ax2.plot(ground_azimuth_distance, beam_pattern_twoway)
+ax2.set_title("Beam pattern")
+ax2.set_ylabel("Relative sensitivity [-]")
 ax2.set_xlabel("Along track distance [m]")
 
+ax3 = axes[1,0]
+ax3.plot(ground_azimuth_distance,backscatter_weight)
+ax3.set_title("Backscatter weight")
+ax3.set_ylabel("[-]")
+ax3.set_xlabel("Along track distance [m]")
 
+ax4 = axes[1,1]
+ax4.plot(ground_azimuth_distance, backscatter_weight * beam_pattern_twoway)
+ax4.set_title("Beam pattern and backscatter weights")
+ax4.set_ylabel("[?]")
+ax4.set_xlabel("Along track distance [m]")
+
+ax5 = axes[1,2]
+ax5.plot(f_Dop_geo + f_Dop_geom, backscatter_weight * beam_pattern_twoway)
+ax5.get_autoscale_on()
+ax5.set_title("Received Doppler spectrum")
+ax5.set_ylabel("Relative return power [-]")
+ax5.set_xlabel("Doppler frequency [Hz]")
+
+fig.tight_layout()
 # %%
 
 
