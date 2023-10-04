@@ -1,11 +1,16 @@
 #%%
-import numpy as np
+from importlib import reload
+
 import matplotlib.pyplot as plt
-from tqdm import tqdm
-from beam_pattern import beam_pattern_oneway, azimuth_beamwidth 
+import numpy as np
 from drama.performance.sar import sinc_bp
+from tqdm import tqdm
+
+from beam_pattern import azimuth_beamwidth, beam_pattern_oneway
+from surface_doppler import Doppler_inc
 
 # TODO check introduction of errors into sigma0 and doppler from radar model
+# --> stereoid.stereoid.oceans.radar_model.py RadarModel.add_errors
 # TODO find beam pattern of Sentinel-1 (speckle and ruis)
 
 #%% 
@@ -82,8 +87,6 @@ ax2.set_xlabel("Along track distance [m]")
 fig.tight_layout()
 
 # %% Geophysical Dopplers
-from surface_doppler import Doppler_inc
-from importlib import reload
 import surface_doppler; reload(surface_doppler); from surface_doppler import Doppler_inc
 
 # NOTE we assume points off the Doppler centroid can be modeled with a slightly different incidence angle
