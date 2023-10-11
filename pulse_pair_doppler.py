@@ -32,20 +32,22 @@ def pulse_pairs(pulse, T_pulse: Union[int, float], T_interpulse: Union[int, floa
 
     return signal, T, samples_interpulse
 
-def random_receive(n_reflectors: int, return_window: int, signal: np.array) -> List[np.array]:
+def random_receive(n_reflectors: int, return_window: int, signal: np.array, seed: int = 42) -> List[np.array]:
     # instantiate empty receive signal
-    receive = np.zeros(return_window).astype(np.complex128) # 
+    receive = np.zeros(return_window).astype(np.complex128) # NOTE instantiated as zeros as empty -> rounding errors
 
+    np.random.seed(seed)
     # iteratively add random signals
-    # TODO vectorize --> because the size of the amtrixes involved, vectorization may lead to overload
+    # TODO vectorize --> NOTE because the size of the matrixes involved, vectorization may lead to overload
     for i in tqdm(range(n_reflectors)):
 
         # reflection has random time delay and amplitude
         delta = np.random.randint(low = 0, high = return_window)
         A = abs(np.random.rand(1)[0]) + 0.01
+        scatterer_phase = np.exp(1j*np.random.rand(1)*2*np.pi)
 
         # for given signals, apply delay and amplitude and combine for total received reflection
-        reflection = A * signal
+        reflection = A * signal * scatterer_phase
         
         # add to total received signal considering time delay
         reflection_length = len(receive[delta:delta +len(reflection)])
@@ -58,6 +60,7 @@ def delayed_correlation(signal_received, signal_length, inter_signal_delay):
     step_size = signal_length + inter_signal_delay
     corr_signals = []
     corr_peak = []
+    corr_max_values = []
 
     # Calculate delayed correlation
     for i in tqdm(range(0, len(signal_received) - signal_length + 1, step_size)):
@@ -67,16 +70,20 @@ def delayed_correlation(signal_received, signal_length, inter_signal_delay):
         # Perform correlation with the next sample range for each step
 
         # NOTE maybe this should be a correlation with conjugate signal, as correlation weights edges???
-        if i + step_size + signal_length < len(signal_received):
+        if i + step_size + signal_length <= len(signal_received):
             next_sample_range = signal_received[i+step_size : i+step_size+signal_length]
 
-            corr_result = correlate(sample_range, next_sample_range, mode = "full", method = "fft")
-
+            # compute correlation between first sample range and next
+            corr_result = correlate(sample_range, next_sample_range, mode = "same", method = "fft")
+            corr_max = np.argmax(abs(corr_result)) # NOTE abs to find full correlation
+            
             # store results
             corr_signals.append(corr_result)
-            corr_peak.append(np.argmax(corr_result))
+            corr_peak.append(corr_max)
+            corr_max_values.append([sample_range[corr_max], next_sample_range[corr_max]])
 
     corr_signals = np.array(corr_signals)
     corr_peak = np.array(corr_peak)
+    corr_max_values = np.array(corr_max_values)
 
-    return corr_signals, corr_peak
+    return corr_signals, corr_peak, corr_max_values
