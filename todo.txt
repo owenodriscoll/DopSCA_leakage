@@ -4,10 +4,9 @@ Will the Doppler cancel out like when a normal distribution of scattering is con
 
 Quantify additional Doppler uncertainty as a result of this interaction between:
     - geometry doppler, beam pattern and surface patterns 
-    - with chirp duration of 2 ms (1 ms --> ~7m along track between pulse pair cross corr. peak)
+
 
 QUESTIONS:
-    - Is phase difference between pulse pair used to derive geophysical Doppler?
     - How is received Doppler spectrum converted to single phase?
     - What is the Temporal (and along track) seperation between aft and fore beam of 
 
