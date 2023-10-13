@@ -1,9 +1,9 @@
-from typing import List, Union
 from numpy.typing import ArrayLike
 import numpy as np
 from scipy.signal import correlate
 from tqdm import tqdm
-
+from dataclasses import dataclass
+from typing import Callable, Union, List, Dict, Any
 
 
 def chirp(t, f, k_c):
@@ -33,10 +33,13 @@ def pulse_pairs(pulse, T_pulse: Union[int, float], T_interpulse: Union[int, floa
     return signal, T, samples_interpulse
 
 def random_receive(n_reflectors: int, return_window: int, signal: np.array, seed: int = 42) -> List[np.array]:
+    
+    # fix randomness for reproducibility
+    np.random.seed(seed)
+    
     # instantiate empty receive signal
     receive = np.zeros(return_window).astype(np.complex128) # NOTE instantiated as zeros as empty -> rounding errors
 
-    np.random.seed(seed)
     # iteratively add random signals
     # TODO vectorize --> NOTE because the size of the matrixes involved, vectorization may lead to overload
     for i in tqdm(range(n_reflectors)):
@@ -55,27 +58,27 @@ def random_receive(n_reflectors: int, return_window: int, signal: np.array, seed
 
     return receive
 
-def delayed_correlation(signal_received, signal_length, inter_signal_delay):
 
-    step_size = signal_length + inter_signal_delay
+def delayed_autocorrelation(signal, window_size, step_size):
+
     corr_signals = []
     corr_peak = []
     corr_max_values = []
 
     # Calculate delayed correlation
-    for i in tqdm(range(0, len(signal_received) - signal_length + 1, step_size)):
+    for i in tqdm(range(0, len(signal) - window_size + 1, window_size)):
         # Get the current sample range
-        sample_range = signal_received[i : i+signal_length]
+        sample_range = signal[i : i+window_size]
         
         # Perform correlation with the next sample range for each step
+        if i + step_size + window_size <= len(signal):
 
-        # NOTE maybe this should be a correlation with conjugate signal, as correlation weights edges???
-        if i + step_size + signal_length <= len(signal_received):
-            next_sample_range = signal_received[i+step_size : i+step_size+signal_length]
+            # select next same range
+            next_sample_range = signal[i+step_size : i + step_size + window_size]
 
             # compute correlation between first sample range and next
             corr_result = correlate(sample_range, next_sample_range, mode = "same", method = "fft")
-            corr_max = np.argmax(abs(corr_result)) # NOTE abs to find full correlation
+            corr_max = np.argmax(abs(corr_result)) 
             
             # store results
             corr_signals.append(corr_result)
@@ -87,3 +90,188 @@ def delayed_correlation(signal_received, signal_length, inter_signal_delay):
     corr_max_values = np.array(corr_max_values)
 
     return corr_signals, corr_peak, corr_max_values
+
+
+c = 3e8 # m/s
+Lambda = 0.05 #c/f # m
+
+@dataclass
+class pulse_pair_doppler:
+    t_pulse: Union[int, float]
+    t_receive: Union[int, float]
+    t_interpulse: Union[int, float]
+    n_reflectors: int #
+    n_pulses: int
+    n_bursts: int
+    bandwidth: Union[int, float]
+    baseband: Union[int, float]
+    oversample_retriev: Union[int, float] = 1
+    range_cell_avg_factor: Union[int, float] = 2 # downsample factor after cross correlation
+    range_cell_size_frac_pulse: Union[int, float] = 1
+    seed: Union[int, float] = 42
+
+    def __post_init__(self):
+        self.k_c = self.bandwidth/self.t_pulse # hz/s
+        fs_nyq = 2 * (self.baseband + self.bandwidth)  # hz, times 2 to follow Nyquist
+        fs = fs_nyq * self.oversample_retriev # hz
+        s = 1/fs # stepsize
+        self.pulse_samples = int(np.round(self.t_pulse/s))
+        self.t_pulse_vector = np.linspace(0, self.t_pulse, self.pulse_samples) # s
+        self.receive_samples = int(np.round(self.t_receive*fs ))
+
+    def chirp(self, centre_around_baseband: bool = True):
+        """
+
+        """
+        b_c = self.k_c / 2 * self.t_pulse_vector # FIXME whys divide by 2?
+        self.pulse = np.cos(2*np.pi*self.t_pulse_vector*(self.baseband + b_c)) + 1j*np.sin(2*np.pi*self.t_pulse_vector*(self.baseband + b_c))
+
+        # set bandwidth to centre around baseband
+        if centre_around_baseband:
+            freq_shift = -self.bandwidth/2
+            self.pulse = self.pulse * np.exp(1j*2*np.pi*freq_shift * self.t_pulse_vector)
+
+        return 
+
+    def pulse_pairs(self):
+        """
+        
+        """
+        # TODO add assert that interpulse delay matches n_pulses - 1
+        sample_rate = self.t_pulse/self.pulse_samples
+
+        # NOTE maybe T_interpulse is one index too long becase it takes a grid cell before and after as well
+        self.samples_interpulse = int(np.ceil(self.t_interpulse/sample_rate))
+        interpulse = np.zeros(self.samples_interpulse)
+        self.signal = np.array(list(self.pulse) + (self.n_pulses -1) * (list(interpulse) + list(self.pulse)))
+
+        return 
+    
+
+    def simulate_reflection(self, seed: Union[int,float, bool] = seed, progress_bar_dissable = False):
+        """
+
+        """
+        # fix randomness for reproducibility
+        if (seed == True) or type(seed) != bool:
+            np.random.seed(seed)
+        
+        # instantiate empty receive signal
+        reflections = np.zeros(self.receive_samples).astype(np.complex128)
+
+        # iteratively add random signals
+        # TODO vectorize --> NOTE because the size of the matrixes involved, vectorization may lead to overload
+        for i in tqdm(range(self.n_reflectors), desc="Reflector", disable=progress_bar_dissable):
+
+            # reflection has random time delay and amplitude
+            delta = np.random.randint(low = 0, high = self.receive_samples)
+            A = abs(np.random.rand(1)[0]) + 0.01
+            scatterer_phase = np.exp(1j*np.random.rand(1)*2*np.pi)
+
+            # for given signals, apply delay and amplitude and combine for total received reflection
+            reflection = A * self.signal * scatterer_phase
+            
+            # add to total received signal considering time delay
+            reflection_length = len(reflections[delta:delta +len(reflection)])
+            reflections[delta:delta+reflection_length] += reflection[:reflection_length]
+
+        self.reflections = reflections
+
+        return 
+    
+    def pulse_compress(self, window_function: bool = False):
+        """
+        
+        """
+        if window_function:
+            taper = np.hamming(self.pulse_samples)
+        else:
+            taper = 1
+        
+        self.pulse_compressed = correlate(self.reflections, taper*self.pulse, mode = "same", method = "fft")
+
+        return 
+    
+
+    def delayed_autocorrelation(self, progress_bar_dissable = False):
+        """
+        
+        """
+
+        window_size = int(self.pulse_samples // (1 / self.range_cell_size_frac_pulse)) 
+        step_size = self.pulse_samples + self.samples_interpulse
+        
+        corr = []
+
+        # Calculate delayed correlation
+        for i in tqdm(range(0, len(self.pulse_compressed) - window_size + 1, window_size), desc="Autocorrelation cell", disable=progress_bar_dissable):
+
+            # Get the current sample range
+            sample_range = self.pulse_compressed[i : i+window_size]
+            
+            # Perform correlation with the next sample range for each step
+            if i + step_size + window_size <= len(self.pulse_compressed):
+
+                # select next same range
+                next_sample_range = self.pulse_compressed[i+step_size : i + step_size + window_size]
+
+                # compute correlation between first sample range and next
+                corr_result = correlate(sample_range, next_sample_range, mode = "same", method = "fft")
+                
+                # store results
+                corr.append(corr_result)
+
+        self.corr = np.array(corr)
+
+        return 
+    
+    def phase_difference(self):
+        """
+
+        """
+
+        corr_index = np.argmax(abs(self.corr), axis = 1)
+        corr_max = self.corr[np.arange(len(self.corr)), corr_index]
+
+        # calculate phase difference at autocorrelation peaks 
+        self.phase_diff = np.arctan2(corr_max.imag, corr_max.real)
+
+        # apply averaging of phase difference for successive autocorrelation cells
+        downsamp_shape = self.phase_diff.shape[0]//self.range_cell_avg_factor
+        self.phase_diff_avg_rg = np.mean(self.phase_diff[:downsamp_shape*self.range_cell_avg_factor]
+                                         .reshape(downsamp_shape, self.range_cell_avg_factor), axis = 1)
+
+        return
+    
+
+    def azimuth_average(self, window_function = False, progress_bar_dissable = True):
+        """
+
+        """
+        self.chirp()
+        self.pulse_pairs()
+
+        np.random.seed(self.seed)
+        corrs = []
+        phase_diffs = []
+        phase_diffs_avg_rg = []
+        for i in tqdm(range(self.n_bursts), desc="Burst number"):
+
+            self.simulate_reflection(seed=False, progress_bar_dissable = progress_bar_dissable)
+            self.pulse_compress(window_function)
+            self.delayed_autocorrelation(progress_bar_dissable = progress_bar_dissable)
+            self.phase_difference()
+            
+            corrs.append(self.corr)
+            phase_diffs.append(self.phase_diff)
+            phase_diffs_avg_rg.append(self.phase_diff_avg_rg)
+
+        # overwrite variables to store infor for all bursts
+        self.corr = np.array(corrs)
+        self.phase_diff = np.array(phase_diffs)
+        self.phase_diff_avg_rg = np.array(phase_diffs_avg_rg)
+
+        # calculate phase difference averaged over range and azimuth
+        self.phase_diffs_avg_rg_az = np.mean(self.phase_diff_avg_rg, axis =0)
+
+        return 
