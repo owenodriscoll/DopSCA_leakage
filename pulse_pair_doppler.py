@@ -215,6 +215,7 @@ class pulse_pair_doppler:
         surface_amplitude_slope = cmod5n_forward(v=v, phi=phi, theta=theta)
         surface_amplitude_slope /= np.max(surface_amplitude_slope)
         surface_amplitude = np.random.rayleigh(2, self.receive_samples)
+        # surface_amplitude = abs(np.random.randn(self.receive_samples))
 
         # generate uniform distribution of phase
         surface_phase = np.exp(1j*2*np.pi*np.random.rand(self.receive_samples))
