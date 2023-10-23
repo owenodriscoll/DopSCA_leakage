@@ -1,5 +1,6 @@
 from numpy.typing import ArrayLike
 import numpy as np
+import copy
 from scipy.signal import correlate, fftconvolve
 from tqdm import tqdm
 from dataclasses import dataclass
@@ -7,6 +8,18 @@ from typing import Callable, Union, List, Dict, Any
 from stereoid.oceans.GMF.cmod5n import cmod5n_forward
 
 c = 3e8 # m/s
+
+
+def temporal_decorr_phase_shift_calculator(target_coherence):
+    """
+
+    """
+    # constants from a least squares solution where A = [1, cos(phase_shift), cos(phase_shift)**2]
+    # NOTE might not work for all surfaces, least squares fit created on single surface
+    a, b, c = 0.40403017, 0.50515681, 0.09433892
+    phase_shift = np.arccos((-b + np.sqrt(b**2 - 4*c*(a-target_coherence))) / (2*c))
+
+    return phase_shift
 
 @dataclass
 class pulse_pair_doppler:
@@ -18,6 +31,7 @@ class pulse_pair_doppler:
     bandwidth: Union[int, float]
     baseband: Union[int, float]
     seed: Union[int, float]
+    temporal_decorr: Union[bool, float] = False
     n_reflectors: int = None
     oversample_retriev: Union[int, float] = 1
     range_cell_avg_factor: Union[int, float] = 2 # downsample factor after cross correlation
@@ -146,9 +160,28 @@ class pulse_pair_doppler:
             n_reflector_filter = 1
 
         self.surface = surface_amplitude * surface_amplitude_slope * surface_phase * n_reflector_filter
-        # self.surface = 1 * 1 * surface_phase * n_reflector_filter
 
-        self.reflections = fftconvolve(self.surface, self.signal, mode = 'valid')
+        # apply decorrelation to surface between bursts if selected
+        if type(self.temporal_decorr) == float:
+            phase_shift = temporal_decorr_phase_shift_calculator(target_coherence=self.temporal_decorr)
+
+            self.subreflections = []
+            surface_decorr = copy.deepcopy(self.surface)
+
+            len_subpulse = self.pulse_samples + self.samples_interpulse
+            for i in range(self.n_pulses):
+                
+                nth_pulse = self.signal[i * len_subpulse: (i+1) * len_subpulse]
+
+                subreflection = fftconvolve(surface_decorr, nth_pulse, mode = 'valid')
+                self.subreflections.append(subreflection)
+
+                surface_decorr = surface_decorr * np.exp(1j*np.random.uniform(low=-phase_shift, high=phase_shift, size = len(surface_decorr)))
+
+            self.reflections = np.sum(self.subreflections, axis=0)
+
+        else:
+            self.reflections = fftconvolve(self.surface, self.signal, mode = 'valid')
 
         return self
     
