@@ -50,7 +50,7 @@ class pulse_pair_doppler:
             freq_shift = -self.bandwidth/2
             self.pulse = self.pulse * np.exp(1j*2*np.pi*freq_shift * self.t_pulse_vector)
 
-        return 
+        return self
 
     def pulse_pairs(self):
         """
@@ -64,7 +64,7 @@ class pulse_pair_doppler:
         interpulse = np.zeros(self.samples_interpulse)
         self.signal = np.array(list(self.pulse) + (self.n_pulses -1) * (list(interpulse) + list(self.pulse)))
 
-        return 
+        return self
     
 
     def _simulate_reflection(self, seed: Union[int,float, bool] = True, progress_bar_dissable = False):
@@ -98,7 +98,7 @@ class pulse_pair_doppler:
 
         self.reflections = reflections
 
-        return 
+        return self
     
     # NOTE this does not take into account varying grid resolution as function of incidence angle
     def simulate_reflection(self, phi_avg: Union[int,float] = 90, v_avg: Union[int,float] = 6, seed: Union[int,float,bool] = True):
@@ -150,7 +150,7 @@ class pulse_pair_doppler:
 
         self.reflections = fftconvolve(self.surface, self.signal, mode = 'valid')
 
-        return 
+        return self
     
     def pulse_compress(self, window_function: bool = False):
         """
@@ -163,7 +163,7 @@ class pulse_pair_doppler:
         
         self.pulse_compressed = correlate(self.reflections, taper*self.pulse, mode = "valid", method = "fft")
 
-        return 
+        return self
     
 
     def delayed_autocorrelation(self, progress_bar_dissable = False):
@@ -195,7 +195,7 @@ class pulse_pair_doppler:
 
         self.corr = np.array(corr)
 
-        return 
+        return self
     
     def phase_difference(self):
         """
@@ -213,7 +213,7 @@ class pulse_pair_doppler:
         self.phase_diff_avg_rg = np.mean(self.phase_diff[:downsamp_shape*self.range_cell_avg_factor]
                                          .reshape(downsamp_shape, self.range_cell_avg_factor), axis = 1)
 
-        return
+        return self
     
 
     def azimuth_average(self, window_function = False, progress_bar_dissable = True):
@@ -246,4 +246,4 @@ class pulse_pair_doppler:
         # calculate phase difference averaged over range and azimuth
         self.phase_diffs_avg_rg_az = np.mean(self.phase_diff_avg_rg, axis =0)
 
-        return 
+        return self
