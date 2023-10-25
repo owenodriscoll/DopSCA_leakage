@@ -42,20 +42,22 @@ class pulse_pair_doppler:
 
 
     def __post_init__(self):
-        self.k_c = self.bandwidth/self.t_pulse # hz/s
-        fs_nyq = 2 * (self.baseband + self.bandwidth)  # hz, times 2 to follow Nyquist
-        fs = fs_nyq * self.oversample_retriev # hz
-        s = 1/fs # stepsize
-        self.pulse_samples = int(np.round(self.t_pulse/s))
-        self.t_pulse_vector = np.linspace(0, self.t_pulse, self.pulse_samples) # s
-        self.receive_samples = int(np.round(self.t_receive*fs ))
-
         if self.seed == None: self.seed = 42
 
     def chirp(self, centre_around_baseband: bool = True):
         """
 
         """
+
+        self.k_c = self.bandwidth/self.t_pulse # hz/s
+        fs_nyq = 2 * (self.baseband + self.bandwidth)  # hz, times 2 to follow Nyquist
+        fs = fs_nyq * self.oversample_retriev # hz
+        s = 1/fs # stepsize
+        
+        self.pulse_samples = int(np.round(self.t_pulse/s))
+        self.t_pulse_vector = np.linspace(0, self.t_pulse, self.pulse_samples) # s
+        self.receive_samples = int(np.round(self.t_receive*fs ))
+
         b_c = self.k_c / 2 * self.t_pulse_vector # FIXME whys divide by 2?
         self.pulse = np.cos(2*np.pi*self.t_pulse_vector*(self.baseband + b_c)) + 1j*np.sin(2*np.pi*self.t_pulse_vector*(self.baseband + b_c))
 
@@ -74,8 +76,8 @@ class pulse_pair_doppler:
         sample_rate = self.t_pulse/self.pulse_samples
 
         # NOTE maybe T_interpulse is one index too long becase it takes a grid cell before and after as well
-        self.samples_interpulse = int(np.ceil(self.t_interpulse/sample_rate))
-        interpulse = np.zeros(self.samples_interpulse)
+        self.interpulse_samples = int(np.ceil(self.t_interpulse/sample_rate))
+        interpulse = np.zeros(self.interpulse_samples)
         self.signal = np.array(list(self.pulse) + (self.n_pulses -1) * (list(interpulse) + list(self.pulse)))
 
         return self
@@ -162,16 +164,17 @@ class pulse_pair_doppler:
         self.surface = surface_amplitude * surface_amplitude_slope * surface_phase * n_reflector_filter
 
         # apply decorrelation to surface between bursts if selected
-        if type(self.temporal_decorr) == float:
+        if type(self.temporal_decorr) != bool:
             phase_shift = temporal_decorr_phase_shift_calculator(target_coherence=self.temporal_decorr)
 
             self.subreflections = []
             surface_decorr = copy.deepcopy(self.surface)
 
-            len_subpulse = self.pulse_samples + self.samples_interpulse
-            for i in range(self.n_pulses):
+            len_subpulse = self.pulse_samples + self.interpulse_samples
+            for n in range(self.n_pulses):
                 
-                nth_pulse = self.signal[i * len_subpulse: (i+1) * len_subpulse]
+                nth_pulse = np.zeros_like(self.signal).astype(np.complex128)
+                nth_pulse[n * len_subpulse: (n+1) * len_subpulse] = self.signal[n * len_subpulse: (n+1) * len_subpulse]
 
                 subreflection = fftconvolve(surface_decorr, nth_pulse, mode = 'valid')
                 self.subreflections.append(subreflection)
@@ -205,7 +208,7 @@ class pulse_pair_doppler:
         """
 
         window_size = int(self.pulse_samples // (1 / self.range_cell_size_frac_pulse)) 
-        step_size = self.pulse_samples + self.samples_interpulse
+        step_size = self.pulse_samples + self.interpulse_samples
         
         corr = []
 
@@ -249,7 +252,7 @@ class pulse_pair_doppler:
         return self
     
 
-    def azimuth_average(self, window_function = False, progress_bar_dissable = True):
+    def azimuth_average(self, window_function = False, range_progress_bar_dissable = True, azimuth_progress_bar_dissable=False):
         """
 
         """
@@ -260,11 +263,11 @@ class pulse_pair_doppler:
         corrs = []
         phase_diffs = []
         phase_diffs_avg_rg = []
-        for i in tqdm(range(self.n_bursts), desc="Burst number"):
+        for i in tqdm(range(self.n_bursts), desc="Burst number", disable = azimuth_progress_bar_dissable):
 
             self.simulate_reflection(seed=False)
             self.pulse_compress(window_function)
-            self.delayed_autocorrelation(progress_bar_dissable = progress_bar_dissable)
+            self.delayed_autocorrelation(progress_bar_dissable = range_progress_bar_dissable)
             self.phase_difference()
             
             corrs.append(self.corr)
