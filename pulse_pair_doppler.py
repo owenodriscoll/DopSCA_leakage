@@ -51,12 +51,12 @@ class pulse_pair_doppler:
 
         self.k_c = self.bandwidth/self.t_pulse # hz/s
         fs_nyq = 2 * (self.baseband + self.bandwidth)  # hz, times 2 to follow Nyquist
-        fs = fs_nyq * self.oversample_retriev # hz
-        s = 1/fs # stepsize
+        self.fs = fs_nyq * self.oversample_retriev # hz
+        s = 1/self.fs # stepsize
         
         self.pulse_samples = int(np.round(self.t_pulse/s))
         self.t_pulse_vector = np.linspace(0, self.t_pulse, self.pulse_samples) # s
-        self.receive_samples = int(np.round(self.t_receive*fs ))
+        self.receive_samples = int(np.round(self.t_receive*self.fs ))
 
         b_c = self.k_c / 2 * self.t_pulse_vector # FIXME whys divide by 2?
         self.pulse = np.cos(2*np.pi*self.t_pulse_vector*(self.baseband + b_c)) + 1j*np.sin(2*np.pi*self.t_pulse_vector*(self.baseband + b_c))
