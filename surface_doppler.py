@@ -62,8 +62,8 @@ def Doppler_inc(inc, phi_w, k_r, u_10, fetch):
     # sigma_los = np.array([sigma_sp, sigma_br_VV, sigma_br_HH, sigma_wb])
     # calculate backscatter ratios for VV polarization assuming specular is negligeable
     rat=[0, 
-        sigma_los[-1]/np.sum(sigma_los[1] + sigma_los[-1]),
-        sigma_los[1]/np.sum(sigma_los[1] + sigma_los[-1])]
+        sigma_los[1]/np.sum(sigma_los[1] + sigma_los[-1]),
+        sigma_los[-1]/np.sum(sigma_los[1] + sigma_los[-1])]
     
     sigma_los_VV = np.sum(sigma_los[:2] + sigma_los[-1])
 
