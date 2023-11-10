@@ -1,8 +1,11 @@
 Requires custom packages:
- - DRaMA: for radar processing functions (e.g. beam patterns) 
+ - DRaMA 0.6: for radar processing functions (e.g. beam patterns) 
     https://gitlab.tudelft.nl/drama/drama
- - S1SEA: For Converting GRD's to NRCS fields
+ - S1SEA 23.4.12: For Converting GRD's to NRCS fields
     https://gitlab.tudelft.nl/plopezdekker/s1sea
- - Xarray-Sentinel: called by S1SEA
+ - Xarray-Sentinel 0.9.5: called by S1SEA. In line 139 of xarray_sentinel/sentinel1.py the raise error is commented out
     https://github.com/bopen/xarray-sentinel 
     
+
+Data downloaded from:
+   https://dataspace.copernicus.eu/browser/

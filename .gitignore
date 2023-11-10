@@ -1,3 +1,4 @@
 __pycache__
 examples/testdir*
 .DS_Store
+DopSCA.code-workspace
