@@ -2,3 +2,6 @@ __pycache__
 examples/testdir*
 .DS_Store
 DopSCA.code-workspace
+ML_analyses
+*scatt4ML.nc
+Sentinel1_analyses/*.nc
