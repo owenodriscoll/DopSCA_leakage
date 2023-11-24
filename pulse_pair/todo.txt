@@ -1,0 +1,28 @@
+What happens when backscatter along track is correlated through air-sea phenomena?
+Will the Doppler cancel out like when a normal distribution of scattering is considered?
+
+
+Quantify additional Doppler uncertainty as a result of this interaction between:
+    - geometry doppler, beam pattern and surface patterns 
+
+
+QUESTIONS:
+    - How is received Doppler spectrum converted to single phase?
+    - What is the Temporal (and along track) seperation between aft and fore beam of 
+
+TO DO:
+    - Find more realistic beam pattern
+    - Find error margins in geometrical Doppler 
+        - If there is tiny error margin in geometrical Doppler it might exceed small geophysical Doppler
+    - Find how to represent variations w.r.t. average  wind-wave interaction fields as wave spectrum
+    - Find if DopRIM can represent these varying wave fields
+    - How to infer Doppler field of unstable fields (or any field with large structures) 
+
+
+TO DO code:
+    - Include non-rectilinear geometry
+    - Include earth's rotation
+
+
+IDEAS:
+- Use CDOP to convert backscatter fields to Doppler to estimate distribution of doppler from range of scenes
