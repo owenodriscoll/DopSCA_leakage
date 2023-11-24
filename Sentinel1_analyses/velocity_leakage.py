@@ -227,7 +227,7 @@ class S1DopplerLeakage:
 
         # for some reason cmod still returns a value even when input is nan, here these are removed
         self.windfield = xr.where(data.nrcs.isnull(), np.nan, windfield)
-        data["windfield"] = self.windfield
+        data["windfield"] = self.windfield.assign_attrs(units= 'm/s', description = 'CMOD5n Windfield for Sentinel-1 backscatter')
 
         # add another dimension for later use
         x_sat = np.arange(data.az.min(), data.az.max(), self.stride)
