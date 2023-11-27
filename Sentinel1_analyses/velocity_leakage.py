@@ -31,6 +31,8 @@ from typing import Callable, Union, List, Dict, Any
 # TODO ugly import from directory up
 # TODO add dask chunking
 # TODO querry era5 per pixel rather than per dataset
+# TODO add docstrings
+# TODO create a second xarray dataset object after removing objects outside beam pattern
 
 # NOTE weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
 # NOTE nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
@@ -45,13 +47,17 @@ import sys
 
 @dataclass
 class S1DopplerLeakage:
+    """
+
+    """
+
     filename: Union[str, list]
     f0: float = 5.3E9
     z0: float = 700E3
     length_antenna: float = 3.2
+    height_antenna: float = 0.3
     beam_pattern: str = "sinc" # ["sinc", "phased_array"]
     beam_weight_in_scene: float = 0.9995 # fraction of the beam weigths within scene
-    height_antenna: float = 0.3
     incidence_angle_scat: float = 40
     incidence_angle_scat_boresight: float = 45
     vx_sat: int = 6800 
@@ -203,8 +209,8 @@ class S1DopplerLeakage:
 
         # calculate new ground range and azimuth range belonging to observation with scatterometer viewing geometry
         grg_offset = np.tan(np.deg2rad(self.incidence_angle_scat)) * self.z0
-        grg = np.arange(self.S1_file.latitude.data.shape[1]) * self.resolution_spatial + grg_offset
-        az = (np.arange(self.S1_file.latitude.data.shape[0]) - self.S1_file.latitude.data.shape[0]//2) * self.resolution_spatial
+        grg = np.arange(self.S1_file.NRCS_VV.data.shape[1]) * self.resolution_spatial + grg_offset
+        az = (np.arange(self.S1_file.NRCS_VV.data.shape[0]) - self.S1_file.NRCS_VV.data.shape[0]//2) * self.resolution_spatial
         x_sat = np.arange(az.min(), az.max(), self.stride)
 
         # create new dataset 

@@ -5,3 +5,4 @@ DopSCA.code-workspace
 ML_analyses
 *scatt4ML.nc
 Sentinel1_analyses/*.nc
+*catboost_info
