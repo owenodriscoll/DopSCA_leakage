@@ -6,3 +6,5 @@ ML_analyses
 *scatt4ML.nc
 Sentinel1_analyses/*.nc
 *catboost_info
+era5_winds*
+data_processed

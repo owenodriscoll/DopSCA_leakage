@@ -31,6 +31,7 @@ from typing import Callable, Union, List, Dict, Any
 # TODO ugly import from directory up
 # TODO add dask chunking
 # TODO querry era5 per pixel rather than per dataset
+    # NOTE currently the mean ERA5 value is chosen over the entire dataset --> USE CONTINUOUS SCENES ONLY!
 # TODO add docstrings
 # TODO create a second xarray dataset object after removing objects outside beam pattern
 
@@ -65,7 +66,8 @@ class S1DopplerLeakage:
     az_mask_cutoff: int = 80_000 # m # two sided
     resolution_spatial: int = 340 # m # 
     scene_size: int = 25_000
-    era5_nc: Union[bool, str] = False # filename of era5 to load
+    era5_directory: str = "" # directory name containing era5 files to load
+    era5_file: Union[bool, str] = False # file name of era5 to load
     path_era5: str = None
     _denoise: bool = True
 
@@ -121,6 +123,10 @@ class S1DopplerLeakage:
         ds = ds.reset_coords(names=dim_filter)
 
         return ds
+    
+    @staticmethod
+    def convert_to_0_360(longitude):
+        return (longitude + 360) % 360
 
     # TODO add chunking
     def open_data(self):
@@ -164,20 +170,34 @@ class S1DopplerLeakage:
 
         """
 
-        if type(self.era5_nc) == str:
-            self.era5 = xr.open_dataset(self.era5_nc)
+        date = self.S1_file.azimuth_time.min().values.astype('datetime64[m]').astype(object)
+        date_rounded = round_to_hour(date)
+        yy, mm, dd, hh = date_rounded.year, date_rounded.month, date_rounded.day, date_rounded.hour
+
+        # NOTE Currently the mean latitude and longitude are chosen
+        latmin = latmax = self.S1_file.latitude.mean().data*1
+        lonmin = lonmax = self.convert_to_0_360(self.S1_file.longitude).mean().data*1 # NOTE correction for fact that ERA5 goes between 0 - 360
+
+        if type(self.era5_file) == str:
+            era5 = xr.open_dataset(self.era5_file)
 
         else:
-            date = self.S1_file.azimuth_time.min().values.astype('datetime64[m]').astype(object)
-            date_rounded = round_to_hour(date)
 
-            yy, mm, dd, hh = date_rounded.year, date_rounded.month, date_rounded.day, date_rounded.hour
-            latmin = latmax = self.S1_file.latitude.mean().data*1
-            lonmin = lonmax = self.S1_file.longitude.mean().data*1
+            sub_str = str(yy) + str(mm)
+            
+            try:
+                era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str in s][0]
+            except:
+                era5_filename = getera5(latmin, latmax, lonmin, lonmax, yy, mm, dd, hh, path=self.path_era5, retrieve=True)
 
-            era5_filename = getera5(latmin, latmax, lonmin, lonmax, yy, mm, dd, hh, path=self.path_era5, retrieve=True)
+            era5 = xr.open_dataset(era5_filename)
 
-            self.era5 = xr.open_dataset(era5_filename)
+        era5 = era5.sel(
+                longitude= lonmin,
+                latitude = latmin,
+                time = np.datetime64(date_rounded, 'ns'),
+                method = 'nearest')
+        self.era5 = era5
 
         return
 
