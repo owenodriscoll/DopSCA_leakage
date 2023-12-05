@@ -35,6 +35,7 @@ from typing import Callable, Union, List, Dict, Any
 # TODO add docstrings
 # TODO create a second xarray dataset object after removing objects outside beam pattern
 
+# NOTE range cell migration may be too large at the far limits for the swath
 # NOTE weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
 # NOTE nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
 
@@ -136,6 +137,7 @@ class S1DopplerLeakage:
 
         # Redirect standard output to a variable
         output_buffer = io.StringIO()
+        stdout_save = sys.stdout
         sys.stdout = output_buffer
 
         # Use the catch_warnings context manager to temporarily catch warnings
@@ -149,14 +151,14 @@ class S1DopplerLeakage:
                         content_partial = grd_to_nrcs(file, prod_res=self.resolution_spatial, denoise=self._denoise)
                         self._file_contents.append(content_partial)
                     except Exception as e:
-                        sys.stdout = sys.__stdout__
+                        sys.stdout = stdout_save
                         print(f'File {i} did not load properly. \nConsider manually adding file content to self._file_contents. File in question: {file} \n Error: {e}')
                         sys.stdout = output_buffer
 
                 self.S1_file = xr.merge(self._file_contents)
 
         # Reset standard output to its original value
-        sys.stdout = sys.__stdout__
+        sys.stdout = stdout_save
 
         # # Optionally print the caught warnings
         # for warning in caught_warnings:
