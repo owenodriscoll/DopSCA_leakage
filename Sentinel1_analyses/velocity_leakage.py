@@ -24,16 +24,20 @@ from typing import Callable, Union, List, Dict, Any
 
 
 # --------- TODO LIST ------------
-# FIXME ambiguity with beam pattern one-or two-way tapering
-# FIXME unfortunate combinates of vx_sat, PRF and resolution_spatial can lead to artifacts
+# FIXME tapering only apply on azimuth or also range? do both have 10 elements?
+# FIXME unfortunate combinates of vx_sat, PRF and resolution_spatial can lead to artifacts, maybe interpolation?
+
 
 # TODO include for and aft viewing geometry in addition to mid, to obtain mutliple velocity vectors
 # TODO ugly import from directory up
 # TODO add dask chunking
 # TODO querry era5 per pixel rather than per dataset
     # NOTE currently the mean ERA5 value is chosen over the entire dataset --> USE CONTINUOUS SCENES ONLY!
+    # TODO if high-res era5 wdir is used, wdir_wrt_sensor should be calculated across slow time
 # TODO add docstrings
 # TODO create a second xarray dataset object after removing objects outside beam pattern
+# TODO include range cell migration?
+
 
 # NOTE range cell migration may be too large at the far limits for the swath
 # NOTE weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
@@ -325,15 +329,19 @@ class S1DopplerLeakage:
         self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.incidence_angle_scat_boresight)
         self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
 
-        if self.beam_pattern == "sinc":
-            beam_rg = sinc_bp(np.sin(self.data['az_angle_wrt_boresight']), L=self.length_antenna, f0=self.f0)**2
-            beam_az = sinc_bp(np.sin(self.data['grg_angle_wrt_boresight']), L=self.height_antenna, f0=self.f0)**2
+        beam_rg_tx = sinc_bp(np.sin(self.data['grg_angle_wrt_boresight']), L=self.height_antenna, f0=self.f0)
+        beam_az_tx = sinc_bp(np.sin(self.data['az_angle_wrt_boresight']), L=self.length_antenna, f0=self.f0)
 
-        # FIXME when using phased array, is tapering only applied on receive?
-        elif self.beam_pattern == "phased_array":
-            beam_rg = np.squeeze(phased_array(np.sin(self.data['az_angle_wrt_boresight']), L=self.length_antenna, f0=self.f0, N=N, w=w)**2)
-            beam_az = np.squeeze(phased_array(np.sin(self.data['grg_angle_wrt_boresight']), L=self.height_antenna, f0=self.f0, N=N, w=w)**2)
-
+        # NOTE when using phased array, tapering is only applied on receive
+        if self.beam_pattern == "phased_array":
+            # beam_rg_rx = np.squeeze(phased_array(np.sin(self.data['az_angle_wrt_boresight']), L=self.height_antenna, f0=self.f0, N=N, w=w)) # FIXME
+            beam_az_rx = np.squeeze(phased_array(np.sin(self.data['az_angle_wrt_boresight']), L=self.length_antenna, f0=self.f0, N=N, w=w))
+            beam_rg = beam_rg_tx**2# * beam_rg_rx # FIXME
+            beam_az = beam_az_tx * beam_az_rx
+        else:
+            beam_rg = beam_rg_tx**2
+            beam_az = beam_az_tx**2
+            
         self.data['beam_grg'] = (['az_idx', 'grg', 'slow_time'], beam_rg)
         self.data['beam_az'] = (['az_idx', 'grg', 'slow_time'], beam_az)
         self.data['beam_grg_az'] = self.data['beam_grg'] * self.data['beam_az']
@@ -341,7 +349,7 @@ class S1DopplerLeakage:
         return
     
         
-    def compute_Doppler_leakage(self, beam_weight_in_scene: float  = 0.9995):
+    def compute_Doppler_leakage(self):
         """
 
         """
@@ -367,7 +375,7 @@ class S1DopplerLeakage:
         data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = receive_rg / weight_rg
 
         # set data to nan for which too much of the beam weights fall outside the scene (ramping up/down)
-        data['beam_cutoff'] = data['beam'].sum(dim = ['az_idx', 'grg'])/ data['beam'].sum(dim = ['az_idx', 'grg']).max() < beam_weight_in_scene
+        data['beam_cutoff'] = data['beam'].sum(dim = ['az_idx', 'grg'])/ data['beam'].sum(dim = ['az_idx', 'grg']).max() < self.beam_weight_in_scene
         data[['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']][dict(slow_time=data['beam_cutoff'])] = np.nan
 
         # add attributes and coarsen data to resolution of subscenes
