@@ -1,7 +1,9 @@
 import os
+import io
 import sys 
 import glob
 import pyproj
+import warnings
 import numpy as np
 import scipy as sp
 from matplotlib import pyplot as plt
@@ -24,7 +26,7 @@ from typing import Callable, Union, List, Dict, Any
 
 
 # --------- TODO LIST ------------
-# FIXME tapering only apply on azimuth or also range? do both have 10 elements?
+# FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and resolution_spatial can lead to artifacts, maybe interpolation?
 
 
@@ -47,17 +49,22 @@ from typing import Callable, Union, List, Dict, Any
 # constants
 c = 3E8
 
-import warnings
-import io
-import sys
+
+
 
 @dataclass
 class S1DopplerLeakage:
     """
+    Input:
+    ------
+    filename: str, list; filename or list of filenames of Sentinel-1 .SAFE
+
+    Output:
+    -------
 
     """
 
-    filename: Union[str, list]
+    filename: Union[str, list] 
     f0: float = 5.3E9
     z0: float = 700E3
     length_antenna: float = 3.2
@@ -85,6 +92,7 @@ class S1DopplerLeakage:
         self.grg_N = int(self.scene_size // self.resolution_spatial)           # number of fast-time samples to average to scene size
         self.slow_time_N = int(self.scene_size // self.stride)                 # number of slow-time samples to average to scene size
     
+
     @staticmethod
     def windfield_over_slow_time(ds, dims):
         """
@@ -101,7 +109,6 @@ class S1DopplerLeakage:
 
         nrcs_scatterometer_equivalent = cmod5n_forward(ds['windfield'].values, ds.attrs['wdir_wrt_sensor'], ds['inc_scatt_eqv'].values)
         ds['nrcs_scat_eqv'] = (dims, nrcs_scatterometer_equivalent, {'units': 'm/s'}) 
-        
         return ds
     
 
@@ -126,48 +133,91 @@ class S1DopplerLeakage:
         ds = ds.assign_coords({dim_new: (dim_filter, dim_new_res*np.arange(ds.dims[dim_filter]))})
         ds = ds.swap_dims({dim_filter:dim_new})
         ds = ds.reset_coords(names=dim_filter)
-
         return ds
     
+
     @staticmethod
     def convert_to_0_360(longitude):
         return (longitude + 360) % 360
 
+
     # TODO add chunking
     def open_data(self):
         """
-        Open data from a file or a list of files.
+        Open data from a file or a list of files. First check if file can be reloaded
         """
 
-        # Redirect standard output to a variable
-        output_buffer = io.StringIO()
-        stdout_save = sys.stdout
-        sys.stdout = output_buffer
+        def create_storage_name(filename, resolution_spatial):
+            """
+            Function to create a storage name for given Sentinel-1 .SAFE file(s)
+            """
+            if isinstance(filename, str):
+                ref_file = filename
+                unique_ids = find_unique_id(filename)
+                
+            elif isinstance(filename, list):
+                ref_file = filename[0]
+                unique_ids = [find_unique_id(file) for file in filename]
+                unique_ids.sort()
+                unique_ids = '_'.join(unique_ids)
+                
+            id_end = ref_file.rfind('/') + 1
+            storage_dir = ref_file[:id_end]
+            return storage_dir + unique_ids + f'_res{resolution_spatial}.nc' 
 
-        # Use the catch_warnings context manager to temporarily catch warnings
-        with warnings.catch_warnings(record=True) as caught_warnings:
-            if isinstance(self.filename, str):
-                self.S1_file = grd_to_nrcs(self.filename, prod_res=self.resolution_spatial, denoise=self._denoise)
-            elif isinstance(self.filename, list):
-                self._file_contents = []
-                for i, file in enumerate(self.filename):
-                    try:
-                        content_partial = grd_to_nrcs(file, prod_res=self.resolution_spatial, denoise=self._denoise)
-                        self._file_contents.append(content_partial)
-                    except Exception as e:
-                        sys.stdout = stdout_save
-                        print(f'File {i} did not load properly. \nConsider manually adding file content to self._file_contents. File in question: {file} \n Error: {e}')
-                        sys.stdout = output_buffer
 
-                self.S1_file = xr.merge(self._file_contents)
+        def find_unique_id(filename, unique_id_length = 4):
+            """
+            Function to find the last four digits (unique ID) of Sentinel-1 naming convention
+            """
+            id_start = filename.rfind('_') + 1 
+            return filename[id_start:id_start+unique_id_length]
 
-        # Reset standard output to its original value
-        sys.stdout = stdout_save
 
-        # # Optionally print the caught warnings
-        # for warning in caught_warnings:
-            # print(warning.message)
+        def open_new_file(filename, resolution_spatial, denoise):
+            """
+            Loads Sentinel-1 .SAFE file(s) and, if multiple, merges them 
+            """
+            # Surpress some warnings
+            output_buffer = io.StringIO()
+            stdout_save = sys.stdout
+            sys.stdout = output_buffer
 
+            # Use the catch_warnings context manager to temporarily catch warnings
+            with warnings.catch_warnings(record=True) as caught_warnings:
+                if isinstance(filename, str):
+                    S1_file = grd_to_nrcs(filename, prod_res=resolution_spatial, denoise=denoise)
+                elif isinstance(filename, list):
+                    _file_contents = []
+                    for i, file in enumerate(filename):
+                        try:
+                            content_partial = grd_to_nrcs(file, prod_res=resolution_spatial, denoise=denoise)
+                            _file_contents.append(content_partial)
+                        except Exception as e:
+                            # temporarily stop surpressing warnings
+                            sys.stdout = stdout_save
+                            print(f'File {i} did not load properly. \nConsider manually adding file content to _file_contents. File in question: {file} \n Error: {e}')
+                            sys.stdout = output_buffer
+
+                    S1_file = xr.merge(_file_contents)
+
+            # Reset system output to saved version
+            sys.stdout = stdout_save
+            return S1_file
+
+
+        storage_name = create_storage_name(self.filename, self.resolution_spatial)
+
+        # reload file if possible
+        if os.path.isfile(storage_name):
+            print(f"Associated file found and reloaded: {storage_name}")
+            self.S1_file = xr.open_dataset(storage_name)
+
+        # else open .SAFE files, process and save as .nc
+        else:
+            self.S1_file = open_new_file(self.filename, self.resolution_spatial, self._denoise)
+            self.S1_file.to_netcdf(storage_name)
+            print(f"No pre-saved file found, instead save loaded file: {storage_name}")
         return
 
 
@@ -204,7 +254,6 @@ class S1DopplerLeakage:
                 time = np.datetime64(date_rounded, 'ns'),
                 method = 'nearest')
         self.era5 = era5
-
         return
 
 
@@ -224,7 +273,6 @@ class S1DopplerLeakage:
 
         # compute directional difference between satelite and era5 wind direction
         self.wdir_wrt_sensor = angular_difference(ground_dir, wdir_era5)
-
         return
 
 
@@ -266,9 +314,9 @@ class S1DopplerLeakage:
         data['x_sat'] = (["slow_time"], x_sat)
 
         self.data = data
-
         return
     
+
     def create_beam_mask(self):
         """
         
@@ -297,9 +345,8 @@ class S1DopplerLeakage:
         self.data['beam_mask'] = ds_mask.mask_az_st * ds_mask.mask_grg
         self.data['mask'] = ~self.data.beam_mask.isnull()
         self.data = self.data.groupby('slow_time').map(self.remove_outside_beampattern, args = ["az", "az_idx", self.data.attrs['resolution_spatial']])
-
-
         return
+
 
     def compute_scatt_eqv_backscatter(self):
         """
@@ -310,9 +357,9 @@ class S1DopplerLeakage:
         self.data['distance_ground'] = calculate_distance(x = self.data["az"], y = self.data["grg"], x0 = self.data["x_sat"]) 
         self.data['inc_scatt_eqv'] = np.rad2deg(np.arctan(self.data['distance_ground']/self.z0))
         self.data = self.data.groupby('slow_time').map(self.windfield_over_slow_time, dims = ['az_idx', 'grg']).transpose('az_idx', 'grg', 'slow_time')
-
         return
     
+
     def compute_beam_pattern(self, N: int = 10, w: float =0.5):
         """
         calculate beam patterns
@@ -345,7 +392,6 @@ class S1DopplerLeakage:
         self.data['beam_grg'] = (['az_idx', 'grg', 'slow_time'], beam_rg)
         self.data['beam_az'] = (['az_idx', 'grg', 'slow_time'], beam_az)
         self.data['beam_grg_az'] = self.data['beam_grg'] * self.data['beam_az']
-
         return
     
         
@@ -381,8 +427,8 @@ class S1DopplerLeakage:
         # add attributes and coarsen data to resolution of subscenes
         self.data['V_leakage_pulse_rg'] = data['V_leakage_pulse_rg'].assign_attrs(units= 'm/s', description = 'Line of sight velocity ')
         self.subscenes = data[['doppler_pulse_rg', 'V_leakage_pulse_rg']].coarsen(grg=self.grg_N, slow_time=self.slow_time_N, boundary='trim').mean(skipna=False) 
-
         return
+
 
     def apply(self, **kwargs):
         self.open_data()
@@ -393,5 +439,4 @@ class S1DopplerLeakage:
         self.compute_scatt_eqv_backscatter()
         self.compute_beam_pattern(**kwargs)
         self.compute_Doppler_leakage()
-
         return
