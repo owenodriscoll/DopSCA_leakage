@@ -9,6 +9,7 @@ import scipy as sp
 from matplotlib import pyplot as plt
 import xarray as xr
 import xarray_sentinel
+import dask.array as da
 import drama.utils as drtls
 import s1sea.geo_plot as gplt
 from s1sea.cmod5n import cmod5n_inverse, cmod5n_forward
@@ -58,6 +59,12 @@ class S1DopplerLeakage:
     Input:
     ------
     filename: str, list; filename or list of filenames of Sentinel-1 .SAFE
+    f0: float; radiowave frequency in hz
+    z0: float; average satellite orbit height in meters
+    length_antenna: float;
+    height_antenna: float;
+    beam_pattern: str; choose from ["sinc", "phased_array"], determines the beam width and side-lobe sensitivity
+
 
     Output:
     -------
@@ -236,11 +243,8 @@ class S1DopplerLeakage:
 
         if type(self.era5_file) == str:
             era5 = xr.open_dataset(self.era5_file)
-
         else:
-
             sub_str = str(yy) + str(mm)
-            
             try:
                 era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str in s][0]
             except:
@@ -360,7 +364,7 @@ class S1DopplerLeakage:
         return
     
 
-    def compute_beam_pattern(self, N: int = 10, w: float =0.5):
+    def compute_beam_pattern(self, N: int = 10, w: float = 0.5):
         """
         calculate beam patterns
 
@@ -376,22 +380,32 @@ class S1DopplerLeakage:
         self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.incidence_angle_scat_boresight)
         self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
 
-        beam_rg_tx = sinc_bp(np.sin(self.data['grg_angle_wrt_boresight']), L=self.height_antenna, f0=self.f0)
-        beam_az_tx = sinc_bp(np.sin(self.data['az_angle_wrt_boresight']), L=self.length_antenna, f0=self.f0)
+        # chunk data to leverage dask's parallelization
+        da_az_angle_wrt_boresight = da.from_array(x=self.data['az_angle_wrt_boresight'], chunks='auto')
+        da_grg_angle_wrt_boresight = da.from_array(x=self.data['grg_angle_wrt_boresight'], chunks='auto')
 
-        # NOTE when using phased array, tapering is only applied on receive
+        # Create a dictionary with kwargs for use in respective beam pattern
+        kwargs_rg_tx = dict(L = self.height_antenna, f0 = self.f0)
+        kwargs_rg_rx = dict(L = self.height_antenna, f0 = self.f0, N = N, w = w)
+        kwargs_az_tx = dict(L = self.length_antenna, f0 = self.f0)
+        kwargs_az_rx = dict(L = self.length_antenna, f0 = self.f0, N = N, w = w)
+
+        beam_rg_tx = da_grg_angle_wrt_boresight.map_blocks(sinc_bp,  dtype='float', **kwargs_rg_tx)
+        beam_az_tx = da_az_angle_wrt_boresight.map_blocks(sinc_bp,  dtype='float', **kwargs_az_tx)
+
+        print("Parallizing beam-pattern computation...")
         if self.beam_pattern == "phased_array":
-            # beam_rg_rx = np.squeeze(phased_array(np.sin(self.data['az_angle_wrt_boresight']), L=self.height_antenna, f0=self.f0, N=N, w=w)) # FIXME
-            beam_az_rx = np.squeeze(phased_array(np.sin(self.data['az_angle_wrt_boresight']), L=self.length_antenna, f0=self.f0, N=N, w=w))
-            beam_rg = beam_rg_tx**2# * beam_rg_rx # FIXME
+            # NOTE when using phased array, tapering is only applied on receive
+            beam_az_rx = da_az_angle_wrt_boresight.map_blocks(phased_array,  dtype='float', new_axis = 0, **kwargs_az_rx).squeeze()
             beam_az = beam_az_tx * beam_az_rx
+
         else:
-            beam_rg = beam_rg_tx**2
             beam_az = beam_az_tx**2
-            
-        self.data['beam_grg'] = (['az_idx', 'grg', 'slow_time'], beam_rg)
-        self.data['beam_az'] = (['az_idx', 'grg', 'slow_time'], beam_az)
-        self.data['beam_grg_az'] = self.data['beam_grg'] * self.data['beam_az']
+        beam_rg = beam_rg_tx**2
+        print("Beam pattern computed")
+
+        beam_grg_az = (beam_az * beam_rg).compute()
+        self.data['beam_grg_az'] = (['az_idx', 'grg', 'slow_time'], beam_grg_az) 
         return
     
         
