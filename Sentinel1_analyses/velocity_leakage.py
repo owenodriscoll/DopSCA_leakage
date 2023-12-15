@@ -2,12 +2,14 @@ import os
 import io
 import sys 
 import glob
+import dask
 import pyproj
 import warnings
 import numpy as np
 import scipy as sp
 from matplotlib import pyplot as plt
 import xarray as xr
+
 import xarray_sentinel
 import dask.array as da
 import drama.utils as drtls
@@ -321,7 +323,128 @@ class S1DopplerLeakage:
         return
     
 
-    def create_beam_mask(self):
+    def create_beam_mask(self): 
+
+        # find indexes along azimuth with beam beam center NOTE does not work squinted
+        beam_center = abs(self.data['x_sat'] - self.data['az']).argmin(dim=['az'])['az'].values 
+
+        # find indxes within allowed beam with over slow time
+        masks = []
+        lengths = []
+        for i in beam_center:
+            mask = np.zeros_like(self.data['az'])  # create a mask
+            lower_limit = np.where(i-self.az_mask_pixels_cutoff < 0, 0, i-self.az_mask_pixels_cutoff)
+            mask[lower_limit:i+self.az_mask_pixels_cutoff+1] = 1
+            idx_valid = np.argwhere(mask).squeeze()
+            lengths.append(idx_valid.shape[0])
+            masks.append(idx_valid)
+
+        # determine which slow-time observations occur at the edges of the scenes, to filter out
+        l = np.array(lengths)
+        l_max = l.max()
+        idx_slow_time = np.argwhere(l==l_max).squeeze()
+        idx_slow_time
+
+        # prepare clipping indixes outside beam pattern
+        _data = []
+        dim_filter = "az"
+        dim_new = "az_idx"
+        dim_new_res = self.data.attrs['resolution_spatial']
+
+        # array with azimuth indexes to select over slow time
+        idx_az = np.array([masks[i] for i in idx_slow_time])
+
+        # prepare data by chunking and conversion to lower bit
+        self.data = self.data.astype('float32').chunk('auto')
+        for i, st in enumerate(idx_slow_time):
+
+            a = self.data.isel(slow_time = st, az = idx_az[i])
+            a = a.assign_coords({dim_new: (dim_filter, dim_new_res*np.arange(a.dims[dim_filter]))})
+            a = a.swap_dims({dim_filter:dim_new})
+            a = a.reset_coords(names=dim_filter)
+
+            _data.append(a)
+
+        self.data = xr.concat(_data, dim = 'slow_time')
+        return 
+    
+
+    def compute_scatt_eqv_backscatter(self):
+        self.data['distance_az'] = (self.data["az"] - self.data["x_sat"]).isel(slow_time = 0)
+        self.data['distance_ground'] = calculate_distance(x = self.data['distance_az'], y = self.data["grg"]) 
+        self.data['inc_scatt_eqv'] = np.rad2deg(np.arctan(self.data['distance_ground']/self.z0))
+
+        self.data = self.data.unify_chunks()
+
+        @dask.delayed
+        def cmod_delayed(coord_value):
+            slice_data = self.data.isel(slow_time=coord_value)
+
+            result = cmod5n_forward(slice_data.windfield.values, self.data.attrs['wdir_wrt_sensor'] , self.data.inc_scatt_eqv.values)
+
+            return  result
+
+        delayed_result = [da.from_delayed(cmod_delayed(coord), 
+                                    shape=self.data.inc_scatt_eqv.shape, 
+                                    dtype=self.data.inc_scatt_eqv.dtype
+                                    ) for coord in range(self.data.dims['slow_time'])]
+        delayed_result = da.stack(delayed_result, axis = 0)
+        self.data['nrcs_scat_eqv'] = (['slow_time', 'az_idx', 'grg'], delayed_result)
+
+        return
+
+
+    def compute_beam_pattern(self):
+
+        self.data['distance_slant_range'] = np.sqrt(self.data['distance_ground']**2 + self.z0**2)
+        self.data['az_angle_wrt_boresight'] = np.arcsin((self.data['distance_az'])/self.data['distance_slant_range']) # incidence from boresight
+        self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.incidence_angle_scat_boresight)
+        self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
+
+        N = 10
+        w = 0.5
+        beam_az_tx = sinc_bp(sin_angle=self.data.az_angle_wrt_boresight, L = self.length_antenna, f0 = self.f0)
+        beam_az_rx = phased_array(sin_angle=self.data.az_angle_wrt_boresight, L = self.length_antenna, f0 = self.f0, N = N, w = w).squeeze()
+        beam_az = beam_az_tx * beam_az_rx
+
+        beam_grg_tx = sinc_bp(sin_angle=self.data.grg_angle_wrt_boresight, L = self.height_antenna, f0 = self.f0)
+        beam_grg_rx = beam_grg_tx
+        beam_grg = beam_grg_tx * beam_grg_rx
+        beam = beam_az * beam_grg
+        self.data['beam'] = (['az_idx', 'grg'], beam)
+
+        self.data = self.data.astype('float32').unify_chunks()
+
+        return
+
+    def compute_Doppler_leakage(self):
+
+        # compute geometrical doppler, beam pattern and nrcs weigths
+        self.data['dop_geom'] = (2 * self.vx_sat * np.sin(self.data['az_angle_wrt_boresight']) / self.Lambda) # eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cummin 
+        self.data['nrcs_weight'] = (self.data['nrcs_scat_eqv'] / self.data['nrcs_scat_eqv'].mean(dim=['az_idx',])) # NOTE weight calculated per azimuth line
+
+        # compute weighted received Doppler and resulting apparent LOS velocity
+        self.data['dop_beam_weighted'] = self.data['dop_geom'] * self.data['beam']* self.data['nrcs_weight']
+        self.data['V_leakage'] = self.Lambda * self.data['dop_beam_weighted'] / (2 * np.sin(np.deg2rad(self.data['inc_scatt_eqv']))) # using the equivalent scatterometer incidence angle
+
+        # calculate scatt equivalent nrcs
+        self.data['nrcs_scat'] = ((self.data['nrcs'] * self.data['beam']).sum(dim='az_idx') / self.data['beam'].sum(dim='az_idx'))
+
+        # sum over azimuth to receive range-slow_time results
+        weight_rg = (self.data['beam'] * self.data['nrcs_weight']).sum(dim='az_idx', skipna=False)
+        receive_rg = self.data[['dop_beam_weighted', 'V_leakage']].sum(dim='az_idx', skipna=False)
+        self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = receive_rg / weight_rg
+        
+        # add attributes and coarsen data to resolution of subscenes
+        self.data['V_leakage_pulse_rg'] = self.data['V_leakage_pulse_rg'].assign_attrs(units= 'm/s', description = 'Line of sight velocity ')
+        self.subscenes = self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']].coarsen(grg=self.grg_N, slow_time=self.slow_time_N, boundary='trim').mean(skipna=False) 
+        
+        self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']] = self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']].compute()
+
+        return
+
+
+    def _create_beam_mask(self):
         """
         
         """
@@ -352,7 +475,7 @@ class S1DopplerLeakage:
         return
 
 
-    def compute_scatt_eqv_backscatter(self):
+    def _compute_scatt_eqv_backscatter(self):
         """
 
         """
@@ -364,7 +487,7 @@ class S1DopplerLeakage:
         return
     
 
-    def compute_beam_pattern(self, N: int = 10, w: float = 0.5):
+    def _compute_beam_pattern(self, N: int = 10, w: float = 0.5):
         """
         calculate beam patterns
 
@@ -409,7 +532,7 @@ class S1DopplerLeakage:
         return
     
         
-    def compute_Doppler_leakage(self):
+    def _compute_Doppler_leakage(self):
         """
 
         """
