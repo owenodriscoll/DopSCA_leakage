@@ -100,26 +100,6 @@ class S1DopplerLeakage:
         self.az_mask_pixels_cutoff = int(self.az_mask_cutoff/2//self.resolution_spatial) 
         self.grg_N = int(self.scene_size // self.resolution_spatial)           # number of fast-time samples to average to scene size
         self.slow_time_N = int(self.scene_size // self.stride)                 # number of slow-time samples to average to scene size
-    
-
-    @staticmethod
-    def windfield_over_slow_time(ds, dims):
-        """
-
-        input
-        -----
-        ds: xr.Dataset, dataset containing the fields 'windfield', 'inc_scatt_eqv' and the attribute 'wdir_wrt_sensor'
-        dims: list, list of strings containing the dimensions for which the nrcs is calculated per the equivalent scatterometer incidence
-
-        output
-        ------
-        ds: xr.Dataset, dataset containing a new variable 'nrcs_scat_eqv'
-        """
-
-        nrcs_scatterometer_equivalent = cmod5n_forward(ds['windfield'].values, ds.attrs['wdir_wrt_sensor'], ds['inc_scatt_eqv'].values)
-        ds['nrcs_scat_eqv'] = (dims, nrcs_scatterometer_equivalent, {'units': 'm/s'}) 
-        return ds
-    
 
     @staticmethod
     def remove_outside_beampattern(ds, dim_filter: str, dim_new: str, dim_new_res: Union[int, float] = 1):
@@ -273,7 +253,8 @@ class S1DopplerLeakage:
         wdir_era5 = np.rad2deg(np.arctan2(u10, v10))
 
         # Compute orientation of observation
-        lats, lons = self.S1_file.latitude.values, self.S1_file.longitude.values
+        # FIXME do not load all values, only load exact indixes needed 
+        lats, lons = self.S1_file.latitude.values, self.S1_file.longitude.values  # FIXME
         geodesic = pyproj.Geod(ellps='WGS84')
         ground_dir, _, _ = geodesic.inv(lons[0, 0], lats[0, 0], lons[-1,0], lats[-1,0])
 
@@ -370,6 +351,40 @@ class S1DopplerLeakage:
     
 
     def compute_scatt_eqv_backscatter(self):
+
+
+        self.data['distance_az'] = (self.data["az"] - self.data["x_sat"]).isel(slow_time = 0)
+        self.data['distance_ground'] = calculate_distance(x = self.data['distance_az'], y = self.data["grg"]) 
+        self.data['inc_scatt_eqv'] = np.rad2deg(np.arctan(self.data['distance_ground']/self.z0))
+        slow_time_vector = self.data.slow_time
+        self.data['inc_scatt_eqv_cube'] = self.data['inc_scatt_eqv'].expand_dims(dim={"slow_time": slow_time_vector})
+
+        self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
+        self.data = self.data.unify_chunks()
+
+        def windfield_over_slow_time(ds, dimensions = ['az_idx', 'grg', 'slow_time']):
+            """
+
+            input
+            -----
+            ds: xr.Dataset, dataset containing the fields 'windfield', 'inc_scatt_eqv' and the attribute 'wdir_wrt_sensor'
+            dims: list, list of strings containing the dimensions for which the nrcs is calculated per the equivalent scatterometer incidence
+
+            output
+            ------
+            ds: xr.Dataset, dataset containing a new variable 'nrcs_scat_eqv'
+            """
+
+            nrcs_scatterometer_equivalent = cmod5n_forward(ds['windfield'].data, ds.attrs['wdir_wrt_sensor'], ds['inc_scatt_eqv_cube'].data)
+            ds['nrcs_scat_eqv'] = (dimensions, nrcs_scatterometer_equivalent, {'units': 'm/s'}) 
+            return ds
+        
+
+        self.data = self.data.map_blocks(windfield_over_slow_time)
+        return
+
+    # NOTE this function uses less RAM but takes significantly longer
+    def _compute_scatt_eqv_backscatter(self):
         self.data['distance_az'] = (self.data["az"] - self.data["x_sat"]).isel(slow_time = 0)
         self.data['distance_ground'] = calculate_distance(x = self.data['distance_az'], y = self.data["grg"]) 
         self.data['inc_scatt_eqv'] = np.rad2deg(np.arctan(self.data['distance_ground']/self.z0))
@@ -475,15 +490,31 @@ class S1DopplerLeakage:
         return
 
 
-    def _compute_scatt_eqv_backscatter(self):
+    def __compute_scatt_eqv_backscatter(self):
         """
 
         """
+        def windfield_over_slow_time(ds, dims):
+            """
 
+            input
+            -----
+            ds: xr.Dataset, dataset containing the fields 'windfield', 'inc_scatt_eqv' and the attribute 'wdir_wrt_sensor'
+            dims: list, list of strings containing the dimensions for which the nrcs is calculated per the equivalent scatterometer incidence
+
+            output
+            ------
+            ds: xr.Dataset, dataset containing a new variable 'nrcs_scat_eqv'
+            """
+
+            nrcs_scatterometer_equivalent = cmod5n_forward(ds['windfield'].values, ds.attrs['wdir_wrt_sensor'], ds['inc_scatt_eqv'].values)
+            ds['nrcs_scat_eqv'] = (dims, nrcs_scatterometer_equivalent, {'units': 'm/s'}) 
+            return ds
+        
         # calculate surface distance between sensor and point on surface as well as equivalent incidence angle for sensor
         self.data['distance_ground'] = calculate_distance(x = self.data["az"], y = self.data["grg"], x0 = self.data["x_sat"]) 
         self.data['inc_scatt_eqv'] = np.rad2deg(np.arctan(self.data['distance_ground']/self.z0))
-        self.data = self.data.groupby('slow_time').map(self.windfield_over_slow_time, dims = ['az_idx', 'grg']).transpose('az_idx', 'grg', 'slow_time')
+        self.data = self.data.groupby('slow_time').map(windfield_over_slow_time, dims = ['az_idx', 'grg']).transpose('az_idx', 'grg', 'slow_time')
         return
     
 
