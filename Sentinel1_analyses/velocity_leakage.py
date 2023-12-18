@@ -297,8 +297,13 @@ class S1DopplerLeakage:
         data["windfield"] = self.windfield.assign_attrs(units= 'm/s', description = 'CMOD5n Windfield for Sentinel-1 backscatter')
 
         # add another dimension for later use
-        x_sat = np.arange(data.az.min(), data.az.max(), self.stride)
-        data['x_sat'] = (["slow_time"], x_sat)
+        # x_sat = np.arange(data.az.min(), data.az.max(), self.stride)
+        # data['x_sat'] = (["slow_time"], x_sat)
+
+        x_sat = da.arange(data.az.min(), data.az.max(), self.stride)
+        slow_time = self.resolution_spatial * da.arange(x_sat.shape[0])
+        x_sat = xr.DataArray(x_sat, dims='slow_time', coords={'slow_time': slow_time})
+        data = data.assign(x_sat=x_sat)
 
         self.data = data
         return
@@ -452,10 +457,10 @@ class S1DopplerLeakage:
         
         # add attributes and coarsen data to resolution of subscenes
         self.data['V_leakage_pulse_rg'] = self.data['V_leakage_pulse_rg'].assign_attrs(units= 'm/s', description = 'Line of sight velocity ')
-        self.subscenes = self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']].coarsen(grg=self.grg_N, slow_time=self.slow_time_N, boundary='trim').mean(skipna=False) 
-        
-        self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']] = self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']].compute()
-
+        # self.subscenes = self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']].coarsen(grg=self.grg_N, slow_time=self.slow_time_N, boundary='trim').mean(skipna=False) 
+        self.data[['doppler_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene', 'nrcs_scat_subscene']] = self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
+        data_to_return = ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene', 'nrcs_scat_subscene']
+        self.data[data_to_return] = self.data[data_to_return].compute()
         return
 
 
