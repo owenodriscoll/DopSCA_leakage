@@ -3,13 +3,13 @@ import io
 import sys 
 import glob
 import dask
+import copy
 import pyproj
 import warnings
 import numpy as np
 import scipy as sp
 from matplotlib import pyplot as plt
 import xarray as xr
-
 import xarray_sentinel
 import dask.array as da
 import drama.utils as drtls
@@ -100,30 +100,7 @@ class S1DopplerLeakage:
         self.az_mask_pixels_cutoff = int(self.az_mask_cutoff/2//self.resolution_spatial) 
         self.grg_N = int(self.scene_size // self.resolution_spatial)           # number of fast-time samples to average to scene size
         self.slow_time_N = int(self.scene_size // self.stride)                 # number of slow-time samples to average to scene size
-
-    @staticmethod
-    def remove_outside_beampattern(ds, dim_filter: str, dim_new: str, dim_new_res: Union[int, float] = 1):
-        """
-        Function to remove data along specific coordinates which corresponding to a mask array in the ds
-
-        input
-        -----
-        ds: xr.Dataset, dataset that contains a 'mask' field and has an attribute 'resolution_spatial'
-        dim_filter: str, name of dimension to filter 
-        dim_new: str, new name of filtered dimension
-        dim_new_res: Union[int, float], resolution along new dimension
-
-        output
-        -------
-        ds: xr.Dataset, dataset with old dimension replaced
-        """
-
-        ds = ds.where(ds.mask, drop = True)
-        ds = ds.assign_coords({dim_new: (dim_filter, dim_new_res*np.arange(ds.dims[dim_filter]))})
-        ds = ds.swap_dims({dim_filter:dim_new})
-        ds = ds.reset_coords(names=dim_filter)
-        return ds
-    
+        self.attributes_to_store = copy.deepcopy(self.__dict__)
 
     @staticmethod
     def convert_to_0_360(longitude):
@@ -297,13 +274,13 @@ class S1DopplerLeakage:
         data["windfield"] = self.windfield.assign_attrs(units= 'm/s', description = 'CMOD5n Windfield for Sentinel-1 backscatter')
 
         # add another dimension for later use
-        # x_sat = np.arange(data.az.min(), data.az.max(), self.stride)
-        # data['x_sat'] = (["slow_time"], x_sat)
-
         x_sat = da.arange(data.az.min(), data.az.max(), self.stride)
         slow_time = self.resolution_spatial * da.arange(x_sat.shape[0])
         x_sat = xr.DataArray(x_sat, dims='slow_time', coords={'slow_time': slow_time})
         data = data.assign(x_sat=x_sat)
+
+        # update with previously stored data
+        data.attrs.update(self.attributes_to_store)
 
         self.data = data
         return
@@ -388,32 +365,6 @@ class S1DopplerLeakage:
         self.data = self.data.map_blocks(windfield_over_slow_time)
         return
 
-    # NOTE this function uses less RAM but takes significantly longer
-    def _compute_scatt_eqv_backscatter(self):
-        self.data['distance_az'] = (self.data["az"] - self.data["x_sat"]).isel(slow_time = 0)
-        self.data['distance_ground'] = calculate_distance(x = self.data['distance_az'], y = self.data["grg"]) 
-        self.data['inc_scatt_eqv'] = np.rad2deg(np.arctan(self.data['distance_ground']/self.z0))
-
-        self.data = self.data.unify_chunks()
-
-        @dask.delayed
-        def cmod_delayed(coord_value):
-            slice_data = self.data.isel(slow_time=coord_value)
-
-            result = cmod5n_forward(slice_data.windfield.values, self.data.attrs['wdir_wrt_sensor'] , self.data.inc_scatt_eqv.values)
-
-            return  result
-
-        delayed_result = [da.from_delayed(cmod_delayed(coord), 
-                                    shape=self.data.inc_scatt_eqv.shape, 
-                                    dtype=self.data.inc_scatt_eqv.dtype
-                                    ) for coord in range(self.data.dims['slow_time'])]
-        delayed_result = da.stack(delayed_result, axis = 0)
-        self.data['nrcs_scat_eqv'] = (['slow_time', 'az_idx', 'grg'], delayed_result)
-
-        return
-
-
     def compute_beam_pattern(self):
 
         self.data['distance_slant_range'] = np.sqrt(self.data['distance_ground']**2 + self.z0**2)
@@ -464,11 +415,72 @@ class S1DopplerLeakage:
         return
 
 
+    def apply(self, **kwargs):
+        self.open_data()
+        self.querry_era5()
+        self.wdir_from_era5()
+        self.create_dataset()
+        self.create_beam_mask()
+        self.compute_scatt_eqv_backscatter()
+        self.compute_beam_pattern(**kwargs)
+        self.compute_Doppler_leakage()
+        return
+    
+
+
+
+
+    # NOTE this function uses less RAM but takes significantly longer
+    def _compute_scatt_eqv_backscatter(self):
+        self.data['distance_az'] = (self.data["az"] - self.data["x_sat"]).isel(slow_time = 0)
+        self.data['distance_ground'] = calculate_distance(x = self.data['distance_az'], y = self.data["grg"]) 
+        self.data['inc_scatt_eqv'] = np.rad2deg(np.arctan(self.data['distance_ground']/self.z0))
+
+        self.data = self.data.unify_chunks()
+
+        @dask.delayed
+        def cmod_delayed(coord_value):
+            slice_data = self.data.isel(slow_time=coord_value)
+
+            result = cmod5n_forward(slice_data.windfield.values, self.data.attrs['wdir_wrt_sensor'] , self.data.inc_scatt_eqv.values)
+
+            return  result
+
+        delayed_result = [da.from_delayed(cmod_delayed(coord), 
+                                    shape=self.data.inc_scatt_eqv.shape, 
+                                    dtype=self.data.inc_scatt_eqv.dtype
+                                    ) for coord in range(self.data.dims['slow_time'])]
+        delayed_result = da.stack(delayed_result, axis = 0)
+        self.data['nrcs_scat_eqv'] = (['slow_time', 'az_idx', 'grg'], delayed_result)
+
+        return
+    
+
     def _create_beam_mask(self):
         """
         
         """
+        def remove_outside_beampattern(ds, dim_filter: str, dim_new: str, dim_new_res: Union[int, float] = 1):
+            """
+            Function to remove data along specific coordinates which corresponding to a mask array in the ds
 
+            input
+            -----
+            ds: xr.Dataset, dataset that contains a 'mask' field and has an attribute 'resolution_spatial'
+            dim_filter: str, name of dimension to filter 
+            dim_new: str, new name of filtered dimension
+            dim_new_res: Union[int, float], resolution along new dimension
+
+            output
+            -------
+            ds: xr.Dataset, dataset with old dimension replaced
+            """
+
+            ds = ds.where(ds.mask, drop = True)
+            ds = ds.assign_coords({dim_new: (dim_filter, dim_new_res*np.arange(ds.dims[dim_filter]))})
+            ds = ds.swap_dims({dim_filter:dim_new})
+            ds = ds.reset_coords(names=dim_filter)
+            return ds
         # compute beam mask around 
         beam_center = abs(self.data['x_sat'] - self.data['az']).argmin(dim=['az'])['az'].values 
 
@@ -602,14 +614,3 @@ class S1DopplerLeakage:
         self.subscenes = data[['doppler_pulse_rg', 'V_leakage_pulse_rg']].coarsen(grg=self.grg_N, slow_time=self.slow_time_N, boundary='trim').mean(skipna=False) 
         return
 
-
-    def apply(self, **kwargs):
-        self.open_data()
-        self.querry_era5()
-        self.wdir_from_era5()
-        self.create_dataset()
-        self.create_beam_mask()
-        self.compute_scatt_eqv_backscatter()
-        self.compute_beam_pattern(**kwargs)
-        self.compute_Doppler_leakage()
-        return
