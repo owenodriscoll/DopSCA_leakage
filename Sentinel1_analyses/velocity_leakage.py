@@ -104,6 +104,10 @@ class S1DopplerLeakage:
         attributes_to_store_updated = {key: value if value is not None and type(value) is not bool else str(value) for key, value in attributes_to_store.items()}
         self.attributes_to_store = attributes_to_store_updated
 
+        # warn if aliasing might occur due to combination of spatial and sampling resolutions 
+        if self.stride % self.resolution_spatial != 0:
+            warnings.warn("Combination of vx_sat, PRF and resolution_spatial may lead to aliasing: (vx_sat / PRF) % resolution_spatial != 0")
+
     @staticmethod
     def convert_to_0_360(longitude):
         return (longitude + 360) % 360
