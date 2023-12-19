@@ -41,10 +41,8 @@ from typing import Callable, Union, List, Dict, Any
     # TODO if high-res era5 wdir is used, wdir_wrt_sensor should be calculated across slow time
 # TODO add docstrings
 # TODO create a second xarray dataset object after removing objects outside beam pattern
-# TODO include range cell migration?
 
-
-# NOTE range cell migration may be too large at the far limits for the swath
+# NOTE Range cell migration not included
 # NOTE weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
 # NOTE nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
 
@@ -100,7 +98,11 @@ class S1DopplerLeakage:
         self.az_mask_pixels_cutoff = int(self.az_mask_cutoff/2//self.resolution_spatial) 
         self.grg_N = int(self.scene_size // self.resolution_spatial)           # number of fast-time samples to average to scene size
         self.slow_time_N = int(self.scene_size // self.stride)                 # number of slow-time samples to average to scene size
-        self.attributes_to_store = copy.deepcopy(self.__dict__)
+        attributes_to_store = copy.deepcopy(self.__dict__)
+
+        # if input values are None or Booleans, convert them to string type
+        attributes_to_store_updated = {key: value if value is not None and type(value) is not bool else str(value) for key, value in attributes_to_store.items()}
+        self.attributes_to_store = attributes_to_store_updated
 
     @staticmethod
     def convert_to_0_360(longitude):
@@ -183,7 +185,7 @@ class S1DopplerLeakage:
         else:
             self.S1_file = open_new_file(self.filename, self.resolution_spatial, self._denoise)
             self.S1_file.to_netcdf(storage_name)
-            print(f"No pre-saved file found, instead save loaded file: {storage_name}")
+            print(f"No pre-saved file found, instead saved loaded file as: {storage_name}")
         return
 
 
@@ -275,7 +277,7 @@ class S1DopplerLeakage:
 
         # add another dimension for later use
         x_sat = da.arange(data.az.min(), data.az.max(), self.stride)
-        slow_time = self.resolution_spatial * da.arange(x_sat.shape[0])
+        slow_time = self.stride * da.arange(x_sat.shape[0])
         x_sat = xr.DataArray(x_sat, dims='slow_time', coords={'slow_time': slow_time})
         data = data.assign(x_sat=x_sat)
 
@@ -306,7 +308,7 @@ class S1DopplerLeakage:
         l = np.array(lengths)
         l_max = l.max()
         idx_slow_time = np.argwhere(l==l_max).squeeze()
-        idx_slow_time
+        self.idx_slow_time = idx_slow_time
 
         # prepare clipping indixes outside beam pattern
         _data = []
@@ -316,6 +318,7 @@ class S1DopplerLeakage:
 
         # array with azimuth indexes to select over slow time
         idx_az = np.array([masks[i] for i in idx_slow_time])
+        self.idx_az = idx_az
 
         # prepare data by chunking and conversion to lower bit
         self.data = self.data.astype('float32').chunk('auto')
