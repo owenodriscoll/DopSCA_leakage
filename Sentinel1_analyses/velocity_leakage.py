@@ -375,11 +375,15 @@ class S1DopplerLeakage:
         self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.incidence_angle_scat_boresight)
         self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
 
-        N = 10
-        w = 0.5
+        N = 10 # number of antenna elements
+        w = 0.5 # complex weighting of elements
         beam_az_tx = sinc_bp(sin_angle=self.data.az_angle_wrt_boresight, L = self.length_antenna, f0 = self.f0)
-        beam_az_rx = phased_array(sin_angle=self.data.az_angle_wrt_boresight, L = self.length_antenna, f0 = self.f0, N = N, w = w).squeeze()
-        beam_az = beam_az_tx * beam_az_rx
+
+        if self.beam_pattern == "sinc":
+            beam_az = beam_az_tx ** 2
+        elif self.beam_pattern == "phased_array":
+            beam_az_rx = phased_array(sin_angle=self.data.az_angle_wrt_boresight, L = self.length_antenna, f0 = self.f0, N = N, w = w).squeeze()
+            beam_az = beam_az_tx * beam_az_rx
 
         beam_grg_tx = sinc_bp(sin_angle=self.data.grg_angle_wrt_boresight, L = self.height_antenna, f0 = self.f0)
         beam_grg_rx = beam_grg_tx
