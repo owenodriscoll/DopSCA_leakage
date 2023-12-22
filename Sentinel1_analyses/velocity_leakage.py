@@ -32,7 +32,8 @@ from typing import Callable, Union, List, Dict, Any
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and resolution_spatial can lead to artifacts, maybe interpolation?
 
-# TODO only save NRCS file using id of files included, e.g. non included .SAFE files will not have their ID added to .nc
+# TODO add option to include geophysical Doppler
+# TODO add land mask filter
 # TODO add warning when chosen ERA5 value is far spatially or temporally
 # TODO include for and aft viewing geometry in addition to mid, to obtain mutliple velocity vectors
 # TODO ugly import from directory up
@@ -68,7 +69,7 @@ class S1DopplerLeakage:
     beam_pattern: str; choose from ["sinc", "phased_array"], determines the beam width and side-lobe sensitivity
     era5_directory: str; directory containing era5 file. Will look for file containing "{yyyy}{mm}.nc" or "era5{yy}{mm}{dd}.nc" to load
     era5_file: str; specific file to load
-    
+
     Output:
     -------
 
@@ -221,13 +222,14 @@ class S1DopplerLeakage:
                 era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str + 'nc' in s][0]
             except:
                 #  if not, try to find single estimate hour ERA5 wind file
-                era5_filename = f"era5{yy}{mm}{dd}.nc"
+                era5_filename = f"era5{yy}{mm:02d}{dd:02d}.nc"
                 if not self.era5_directory is None:
                     era5_filename = os.path.join(self.era5_directory, era5_filename)
 
                 # if neither monthly file nor hourly single estimate file exist, download new single estimate hour
                 if not os.path.isfile(era5_filename):
                     era5_filename = getera5(latmin, latmax, lonmin, lonmax, yy, mm, dd, hh, path=self.era5_directory, retrieve=True)
+            
             print(f"Loading nearest ERA5 point w.r.t. observation from ERA5 file: {era5_filename}")
             era5 = xr.open_dataset(era5_filename)
 
