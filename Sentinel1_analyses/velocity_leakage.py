@@ -32,7 +32,8 @@ from typing import Callable, Union, List, Dict, Any
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and resolution_spatial can lead to artifacts, maybe interpolation?
 
-
+# TODO only save NRCS file using id of files included, e.g. non included .SAFE files will not have their ID added to .nc
+# TODO add warning when chosen ERA5 value is far spatially or temporally
 # TODO include for and aft viewing geometry in addition to mid, to obtain mutliple velocity vectors
 # TODO ugly import from directory up
 # TODO add dask chunking
@@ -42,6 +43,7 @@ from typing import Callable, Union, List, Dict, Any
 # TODO add docstrings
 # TODO create a second xarray dataset object after removing objects outside beam pattern
 
+# NOTE loading .SAFE often does not work. Needs to be dual pol data
 # NOTE Range cell migration not included
 # NOTE weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
 # NOTE nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
@@ -64,8 +66,9 @@ class S1DopplerLeakage:
     length_antenna: float;
     height_antenna: float;
     beam_pattern: str; choose from ["sinc", "phased_array"], determines the beam width and side-lobe sensitivity
-
-
+    era5_directory: str; directory containing era5 file. Will look for file containing "{yyyy}{mm}.nc" or "era5{yy}{mm}{dd}.nc" to load
+    era5_file: str; specific file to load
+    
     Output:
     -------
 
@@ -87,7 +90,6 @@ class S1DopplerLeakage:
     scene_size: int = 25_000
     era5_directory: str = "" # directory name containing era5 files to load
     era5_file: Union[bool, str] = False # file name of era5 to load
-    path_era5: str = None
     _denoise: bool = True
 
 
@@ -157,14 +159,17 @@ class S1DopplerLeakage:
 
             # Use the catch_warnings context manager to temporarily catch warnings
             with warnings.catch_warnings(record=True) as caught_warnings:
+                self._successful_files = []
                 if isinstance(filename, str):
                     S1_file = grd_to_nrcs(filename, prod_res=resolution_spatial, denoise=denoise)
+                    self._successful_files.append(file)
                 elif isinstance(filename, list):
                     _file_contents = []
                     for i, file in enumerate(filename):
                         try:
                             content_partial = grd_to_nrcs(file, prod_res=resolution_spatial, denoise=denoise)
                             _file_contents.append(content_partial)
+                            self._successful_files.append(file)
                         except Exception as e:
                             # temporarily stop surpressing warnings
                             sys.stdout = stdout_save
@@ -188,6 +193,7 @@ class S1DopplerLeakage:
         # else open .SAFE files, process and save as .nc
         else:
             self.S1_file = open_new_file(self.filename, self.resolution_spatial, self._denoise)
+            storage_name = create_storage_name(self._successful_files, self.resolution_spatial)
             self.S1_file.to_netcdf(storage_name)
             print(f"No pre-saved file found, instead saved loaded file as: {storage_name}")
         return
@@ -211,12 +217,21 @@ class S1DopplerLeakage:
         else:
             sub_str = str(yy) + str(mm)
             try:
-                era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str in s][0]
+                # try to find if monthly data file exists which to load 
+                era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str + 'nc' in s][0]
             except:
-                era5_filename = getera5(latmin, latmax, lonmin, lonmax, yy, mm, dd, hh, path=self.path_era5, retrieve=True)
+                #  if not, try to find single estimate hour ERA5 wind file
+                era5_filename = f"era5{yy}{mm}{dd}.nc"
+                if not self.era5_directory is None:
+                    era5_filename = os.path.join(self.era5_directory, era5_filename)
 
+                # if neither monthly file nor hourly single estimate file exist, download new single estimate hour
+                if not os.path.isfile(era5_filename):
+                    era5_filename = getera5(latmin, latmax, lonmin, lonmax, yy, mm, dd, hh, path=self.era5_directory, retrieve=True)
+            print(f"Loading nearest ERA5 point w.r.t. observation from ERA5 file: {era5_filename}")
             era5 = xr.open_dataset(era5_filename)
 
+        # TODO add check that nearest is not too far of spatially or temporally
         era5 = era5.sel(
                 longitude= lonmin,
                 latitude = latmin,
