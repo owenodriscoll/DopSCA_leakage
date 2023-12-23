@@ -505,8 +505,8 @@ class S1DopplerLeakage:
         self_copy.S1_file['inc'] = (['azimuth_time', 'ground_range'], new_inc)
 
         # define names of variables to consider and return
-        data_to_return = ['doppler_pulse_rg', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg', 'V_leakage_pulse_rg_subscene', 'nrcs_scat']
-        data_to_return_new_names = [name + '_inverted' for name in data_to_return[:-1]] + ['nrcs_scat_w_noise']
+        data_to_return = ['doppler_pulse_rg', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg', 'V_leakage_pulse_rg_subscene', 'nrcs_scat', 'nrcs_scat_subscene']
+        data_to_return_new_names = [name + '_inverted' for name in data_to_return[:-2]] + ['nrcs_scat_w_noise', 'nrcs_scat_subscene_w_noise']
         
         # repeat the  previous chain of computations NOTE this could be done more efficiently
         self_copy.create_dataset()
