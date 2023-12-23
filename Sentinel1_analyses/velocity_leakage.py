@@ -33,6 +33,7 @@ from typing import Callable, Union, List, Dict, Any
 # FIXME unfortunate combinates of vx_sat, PRF and resolution_spatial can lead to artifacts, maybe interpolation?
 
 # TODO add option to include geophysical Doppler
+# TODO add hourly info and latlong when saving single era5 estimate
 # TODO add land mask filter
 # TODO add dask delayed to beam pattern computation
 # TODO add warning when chosen ERA5 value is far spatially or temporally
@@ -116,6 +117,19 @@ class S1DopplerLeakage:
     @staticmethod
     def convert_to_0_360(longitude):
         return (longitude + 360) % 360
+    
+    @staticmethod
+    def speckle_noise(noise_shape: tuple):
+        """
+        Generates multiplicative speckle noise with with mean value of 1
+        """
+
+        noise_real = np.random.randn(*noise_shape)
+        noise_imag = np.random.randn(*noise_shape)
+        noise = np.array([complex(a,b) for a, b in zip(noise_real.ravel(), noise_imag.ravel())])
+        noise = (abs(noise)**2)/2
+
+        return noise.reshape(noise_shape)
 
 
     # TODO add chunking
@@ -221,7 +235,7 @@ class S1DopplerLeakage:
             sub_str = str(yy) + str(mm)
             try:
                 # try to find if monthly data file exists which to load 
-                era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str + 'nc' in s][0]
+                era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str + '.nc' in s][0]
             except:
                 #  if not, try to find single estimate hour ERA5 wind file
                 era5_filename = f"era5{yy}{mm:02d}{dd:02d}.nc"
@@ -450,9 +464,13 @@ class S1DopplerLeakage:
         return
 
 
-    def compute_leakage_velocity_estimate(self):
+    def compute_leakage_velocity_estimate(self, speckle_noise: bool = True):
         """
         Method that estimates the leakage velocity using the scatterometer backscatter field. 
+
+        Input
+        -----
+        speckle_noise: bool; whether to apply multiplicative speckle noise to scatterometer estimated nrcs
         """
         # find indexes of S1 scene that were cropped (outside full beam pattern)
         idx_start = self.idx_az[0][self.az_mask_pixels_cutoff]
@@ -462,9 +480,17 @@ class S1DopplerLeakage:
         new_nrcs = np.nan * np.ones_like(self.S1_file.NRCS_VV)
         new_inc = np.nan * np.ones_like(self.S1_file.NRCS_VV)
 
+        # add speckle noise assuming a single look
+        if speckle_noise:
+            noise_multiplier = self.speckle_noise(self.data.nrcs_scat.shape)
+        elif not speckle_noise:
+            noise_multiplier = 1
+
+        single_look_nrcs = noise_multiplier * self.data.nrcs_scat
+
         # interpolate estimated scatterometer data back to S1 grid size
         slow_time_upsamp = np.linspace(self.data.slow_time[0], self.data.slow_time[-1], idx_end - idx_start) 
-        nrcs_scat_upsamp = self.data.nrcs_scat.T.interp(slow_time = slow_time_upsamp)
+        nrcs_scat_upsamp = single_look_nrcs.T.interp(slow_time = slow_time_upsamp)
         inc_scat_upsamp = self.data.inc_scatt_eqv_cube.mean(dim='az_idx').T.interp(slow_time = slow_time_upsamp)
 
         # apply cropping 
@@ -479,8 +505,8 @@ class S1DopplerLeakage:
         self_copy.S1_file['inc'] = (['azimuth_time', 'ground_range'], new_inc)
 
         # define names of variables to consider and return
-        data_to_return = ['doppler_pulse_rg', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg', 'V_leakage_pulse_rg_subscene']
-        data_to_return_new_names = [name + '_inverted' for name in data_to_return]
+        data_to_return = ['doppler_pulse_rg', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg', 'V_leakage_pulse_rg_subscene', 'nrcs_scat']
+        data_to_return_new_names = [name + '_inverted' for name in data_to_return[:-1]] + ['nrcs_scat_w_noise']
         
         # repeat the  previous chain of computations NOTE this could be done more efficiently
         self_copy.create_dataset()
