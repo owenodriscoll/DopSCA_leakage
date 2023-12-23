@@ -34,6 +34,7 @@ from typing import Callable, Union, List, Dict, Any
 
 # TODO add option to include geophysical Doppler
 # TODO add land mask filter
+# TODO add dask delayed to beam pattern computation
 # TODO add warning when chosen ERA5 value is far spatially or temporally
 # TODO include for and aft viewing geometry in addition to mid, to obtain mutliple velocity vectors
 # TODO ugly import from directory up
@@ -42,7 +43,8 @@ from typing import Callable, Union, List, Dict, Any
     # NOTE currently the mean ERA5 value is chosen over the entire dataset --> USE CONTINUOUS SCENES ONLY!
     # TODO if high-res era5 wdir is used, wdir_wrt_sensor should be calculated across slow time
 # TODO add docstrings
-# TODO create a second xarray dataset object after removing objects outside beam pattern
+    # TODO add kwargs to input for phased beam pattern in create_beampattern
+# TODO currently inversion interpolates scatterometer grid size to S1 grid, change to first apply inversion and then interpolate 
 
 # NOTE loading .SAFE often does not work. Needs to be dual pol data
 # NOTE Range cell migration not included
@@ -263,22 +265,22 @@ class S1DopplerLeakage:
         return
 
 
-    def create_dataset(self):
+    def create_dataset(self, var_nrcs: str = "NRCS_VV", var_inc: str = "inc"):
         """
 
         """  
 
         # calculate new ground range and azimuth range belonging to observation with scatterometer viewing geometry
         grg_offset = np.tan(np.deg2rad(self.incidence_angle_scat)) * self.z0
-        grg = np.arange(self.S1_file.NRCS_VV.data.shape[1]) * self.resolution_spatial + grg_offset
-        az = (np.arange(self.S1_file.NRCS_VV.data.shape[0]) - self.S1_file.NRCS_VV.data.shape[0]//2) * self.resolution_spatial
+        grg = np.arange(self.S1_file[var_nrcs].data.shape[1]) * self.resolution_spatial + grg_offset
+        az = (np.arange(self.S1_file[var_nrcs].data.shape[0]) - self.S1_file[var_nrcs].data.shape[0]//2) * self.resolution_spatial
         x_sat = np.arange(az.min(), az.max(), self.stride)
 
         # create new dataset 
         data = xr.Dataset(
             data_vars=dict(
-                nrcs = (["az", "grg"], self.S1_file.NRCS_VV.data, {'units': 'm2/m2'}),
-                inc = (["az", "grg"], self.S1_file.inc.data, {'units': 'Degrees'}),
+                nrcs = (["az", "grg"], self.S1_file[var_nrcs].data, {'units': 'm2/m2'}),
+                inc = (["az", "grg"], self.S1_file[var_inc].data, {'units': 'Degrees'}),
             ),
             coords=dict(
                 az = (["az"], az, {'units': 'm'}),
@@ -384,7 +386,6 @@ class S1DopplerLeakage:
             nrcs_scatterometer_equivalent = cmod5n_forward(ds['windfield'].data, ds.attrs['wdir_wrt_sensor'], ds['inc_scatt_eqv_cube'].data)
             ds['nrcs_scat_eqv'] = (dimensions, nrcs_scatterometer_equivalent, {'units': 'm/s'}) 
             return ds
-        
 
         self.data = self.data.map_blocks(windfield_over_slow_time)
         return
@@ -396,6 +397,7 @@ class S1DopplerLeakage:
         self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.incidence_angle_scat_boresight)
         self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
 
+        # NOTE the following computations are directly computed, a delayed lazy computation may be better
         N = 10 # number of antenna elements
         w = 0.5 # complex weighting of elements
         beam_az_tx = sinc_bp(sin_angle=self.data.az_angle_wrt_boresight, L = self.length_antenna, f0 = self.f0)
@@ -416,7 +418,8 @@ class S1DopplerLeakage:
 
         return
 
-    def compute_Doppler_leakage(self):
+    def compute_Doppler_leakage(self, data_to_return: list[str] = 
+                                ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene', 'nrcs_scat_subscene']):
 
         # compute geometrical doppler, beam pattern and nrcs weigths
         self.data['dop_geom'] = (2 * self.vx_sat * np.sin(self.data['az_angle_wrt_boresight']) / self.Lambda) # eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cummin 
@@ -434,13 +437,61 @@ class S1DopplerLeakage:
         receive_rg = self.data[['dop_beam_weighted', 'V_leakage']].sum(dim='az_idx', skipna=False)
         self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = receive_rg / weight_rg
         
-        # add attributes and coarsen data to resolution of subscenes
+        # add attribute
         self.data['V_leakage_pulse_rg'] = self.data['V_leakage_pulse_rg'].assign_attrs(units= 'm/s', description = 'Line of sight velocity ')
-        # self.subscenes = self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']].coarsen(grg=self.grg_N, slow_time=self.slow_time_N, boundary='trim').mean(skipna=False) 
-        self.data[['doppler_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene', 'nrcs_scat_subscene']] = self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
-        data_to_return = ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene', 'nrcs_scat_subscene']
+
+        # low-pass filter scatterometer data to subscene resolution
+        data_4subscene = ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']
+        data_subscene = [name + '_subscene' for name in data_4subscene]
+        self.data[data_subscene] = self.data[data_4subscene].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
+
+        # compute fields of interest
         self.data[data_to_return] = self.data[data_to_return].compute()
         return
+
+
+    def compute_leakage_velocity_estimate(self):
+        """
+        Method that estimates the leakage velocity using the scatterometer backscatter field. 
+        """
+        # find indexes of S1 scene that were cropped (outside full beam pattern)
+        idx_start = self.idx_az[0][self.az_mask_pixels_cutoff]
+        idx_end = self.idx_az[-1][self.az_mask_pixels_cutoff]
+
+        # create placeholder S1 data (pre-cropped)
+        new_nrcs = np.nan * np.ones_like(self.S1_file.NRCS_VV)
+        new_inc = np.nan * np.ones_like(self.S1_file.NRCS_VV)
+
+        # interpolate estimated scatterometer data back to S1 grid size
+        slow_time_upsamp = np.linspace(self.data.slow_time[0], self.data.slow_time[-1], idx_end - idx_start) 
+        nrcs_scat_upsamp = self.data.nrcs_scat.T.interp(slow_time = slow_time_upsamp)
+        inc_scat_upsamp = self.data.inc_scatt_eqv_cube.mean(dim='az_idx').T.interp(slow_time = slow_time_upsamp)
+
+        # apply cropping 
+        new_nrcs[idx_start: idx_end, :] = nrcs_scat_upsamp
+        new_inc[idx_start: idx_end, :] = inc_scat_upsamp
+
+        # copy existing object to avoid overwritting
+        self_copy = copy.deepcopy(self)
+
+        # replace real S1 data with scatterometer data interpolated to S1
+        self_copy.S1_file['NRCS_VV'] = (['azimuth_time', 'ground_range'], new_nrcs)
+        self_copy.S1_file['inc'] = (['azimuth_time', 'ground_range'], new_inc)
+
+        # define names of variables to consider and return
+        data_to_return = ['doppler_pulse_rg', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg', 'V_leakage_pulse_rg_subscene']
+        data_to_return_new_names = [name + '_inverted' for name in data_to_return]
+        
+        # repeat the  previous chain of computations NOTE this could be done more efficiently
+        self_copy.create_dataset()
+        self_copy.create_beam_mask()
+        self_copy.compute_scatt_eqv_backscatter()
+        self_copy.compute_beam_pattern()
+        self_copy.compute_Doppler_leakage(data_to_return=data_to_return)
+
+        # add estimated leakage velocity back to original object
+        self.data[data_to_return_new_names] = self_copy.data[data_to_return]
+        return 
 
 
     def apply(self, **kwargs):
@@ -451,9 +502,14 @@ class S1DopplerLeakage:
         self.create_beam_mask()
         self.compute_scatt_eqv_backscatter()
         self.compute_beam_pattern(**kwargs)
-        self.compute_Doppler_leakage()
+        self.compute_Doppler_leakage(**kwargs)
         return
     
+
+
+
+
+
 
 
 
