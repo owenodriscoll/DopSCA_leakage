@@ -34,9 +34,6 @@ from typing import Callable, Union, List, Dict, Any
 
 # TODO add option to include geophysical Doppler
 # TODO add land mask filter
-# TODO add dask delayed to beam pattern computation
-# TODO add warning when chosen ERA5 value is far spatially or temporally
-# TODO include for and aft viewing geometry in addition to mid, to obtain mutliple velocity vectors
 # TODO ugly import from directory up
 # TODO add dask chunking
 # TODO querry era5 per pixel rather than per dataset
@@ -119,11 +116,11 @@ class S1DopplerLeakage:
         return (longitude + 360) % 360
     
     @staticmethod
-    def speckle_noise(noise_shape: tuple):
+    def speckle_noise(noise_shape: tuple, random_satte: int = 42):
         """
         Generates multiplicative speckle noise with mean value of 1
         """
-
+        np.random.seed(42)
         noise_real = np.random.randn(*noise_shape)
         noise_imag = np.random.randn(*noise_shape)
         noise = np.array([complex(a,b) for a, b in zip(noise_real.ravel(), noise_imag.ravel())])
@@ -398,7 +395,7 @@ class S1DopplerLeakage:
         self.data['inc_scatt_eqv_cube'] = self.data['inc_scatt_eqv'].expand_dims(dim={"slow_time": slow_time_vector})
 
         self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
-        self.data = self.data.unify_chunks()
+        self.data = self.data.astype('float32').unify_chunks()
 
         def windfield_over_slow_time(ds, dimensions = ['az_idx', 'grg', 'slow_time']):
             """
@@ -418,6 +415,7 @@ class S1DopplerLeakage:
             return ds
 
         self.data = self.data.map_blocks(windfield_over_slow_time)
+        self.data = self.data.astype('float32')
         return
 
     def compute_beam_pattern(self):
@@ -444,15 +442,16 @@ class S1DopplerLeakage:
         beam_grg_rx = beam_grg_tx
         beam_grg = beam_grg_tx * beam_grg_rx
         beam = beam_az * beam_grg
-        self.data['beam'] = (['az_idx', 'grg'], beam)
+        self.data['beam'] = ([*self.data.az_angle_wrt_boresight.dims], beam)
 
-        self.data = self.data.astype('float32').unify_chunks()
+        self.data = self.data.astype('float32')
 
         return
 
-    def compute_Doppler_leakage(self, data_to_return: list[str] = 
-                                ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene', 'nrcs_scat_subscene']):
+    def compute_leakage_velocity(self):
+        """
 
+        """
         # compute geometrical doppler, beam pattern and nrcs weigths
         self.data['dop_geom'] = (2 * self.vx_sat * np.sin(self.data['az_angle_wrt_boresight']) / self.Lambda) # eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cummin 
         self.data['nrcs_weight'] = (self.data['nrcs_scat_eqv'] / self.data['nrcs_scat_eqv'].mean(dim=['az_idx',])) # NOTE weight calculated per azimuth line
@@ -476,15 +475,13 @@ class S1DopplerLeakage:
         data_4subscene = ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']
         data_subscene = [name + '_subscene' for name in data_4subscene]
         self.data[data_subscene] = self.data[data_4subscene].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
-
-        # compute fields of interest
-        self.data[data_to_return] = self.data[data_to_return].compute()
         return
 
 
     def compute_leakage_velocity_estimate(self, speckle_noise: bool = True):
         """
         Method that estimates the leakage velocity using the scatterometer backscatter field. 
+        Can be done more efficeintly
 
         Input
         -----
@@ -531,14 +528,26 @@ class S1DopplerLeakage:
         self_copy.create_beam_mask()
         self_copy.compute_scatt_eqv_backscatter()
         self_copy.compute_beam_pattern()
-        self_copy.compute_Doppler_leakage(data_to_return=data_to_return)
+        self_copy.compute_leakage_velocity()
 
         # add estimated leakage velocity back to original object
         self.data[data_to_return_new_names] = self_copy.data[data_to_return]
         return 
 
 
-    def apply(self, **kwargs):
+    def apply(self, 
+              data_to_return: list[str] = 
+                                ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 
+                                 'doppler_pulse_rg_subscene', 'doppler_pulse_rg_subscene_inverted',
+                                 'V_leakage_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene_inverted',
+                                 'nrcs_scat_subscene', 'doppler_pulse_rg_inverted',
+                                 'V_leakage_pulse_rg_inverted', 'nrcs_scat_w_noise',
+                                 'nrcs_scat_subscene_w_noise'],
+                **kwargs):
+        """
+
+        """
+
         self.open_data()
         self.querry_era5()
         self.wdir_from_era5()
@@ -546,7 +555,10 @@ class S1DopplerLeakage:
         self.create_beam_mask()
         self.compute_scatt_eqv_backscatter()
         self.compute_beam_pattern(**kwargs)
-        self.compute_Doppler_leakage(**kwargs)
+        self.compute_leakage_velocity(**kwargs)
+        self.compute_leakage_velocity_estimate(**kwargs)
+
+        self.data[data_to_return] = self.data[data_to_return].chunk('auto').compute()
         return
     
 
@@ -564,7 +576,7 @@ class S1DopplerLeakage:
         self.data['distance_ground'] = calculate_distance(x = self.data['distance_az'], y = self.data["grg"]) 
         self.data['inc_scatt_eqv'] = np.rad2deg(np.arctan(self.data['distance_ground']/self.z0))
 
-        self.data = self.data.unify_chunks()
+        # self.data = self.data.unify_chunks()
 
         @dask.delayed
         def cmod_delayed(coord_value):
