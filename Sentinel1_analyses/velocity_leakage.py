@@ -13,16 +13,16 @@ import xarray as xr
 import xarray_sentinel
 import dask.array as da
 import drama.utils as drtls
-import s1sea.geo_plot as gplt
+# import s1sea.geo_plot as gplt
 from s1sea.cmod5n import cmod5n_inverse, cmod5n_forward
-from s1sea.get_era5 import getera5
+# from s1sea.get_era5 import getera5
 from s1sea.s1_preprocess import grd_to_nrcs
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 
 # FIXME fix this
 # importing from one directory  up
 sys.path.insert(0, "../" )
-from misc import round_to_hour, angular_difference, calculate_distance  
+from misc import round_to_hour, angular_difference, calculate_distance, era5_wind_single_time_loc
 
 from dataclasses import dataclass
 from typing import Callable, Union, List, Dict, Any
@@ -33,7 +33,6 @@ from typing import Callable, Union, List, Dict, Any
 # FIXME unfortunate combinates of vx_sat, PRF and resolution_spatial can lead to artifacts, maybe interpolation?
 
 # TODO add option to include geophysical Doppler
-# TODO add hourly info and latlong when saving single era5 estimate
 # TODO add land mask filter
 # TODO add dask delayed to beam pattern computation
 # TODO add warning when chosen ERA5 value is far spatially or temporally
@@ -42,6 +41,7 @@ from typing import Callable, Union, List, Dict, Any
 # TODO add dask chunking
 # TODO querry era5 per pixel rather than per dataset
     # NOTE currently the mean ERA5 value is chosen over the entire dataset --> USE CONTINUOUS SCENES ONLY!
+        # TODO assess lekage velovity estimation performance assuming 0-360 reference wind direction 
     # TODO if high-res era5 wdir is used, wdir_wrt_sensor should be calculated across slow time
 # TODO add docstrings
     # TODO add kwargs to input for phased beam pattern in create_beampattern
@@ -121,7 +121,7 @@ class S1DopplerLeakage:
     @staticmethod
     def speckle_noise(noise_shape: tuple):
         """
-        Generates multiplicative speckle noise with with mean value of 1
+        Generates multiplicative speckle noise with mean value of 1
         """
 
         noise_real = np.random.randn(*noise_shape)
@@ -224,6 +224,7 @@ class S1DopplerLeakage:
         date = self.S1_file.azimuth_time.min().values.astype('datetime64[m]').astype(object)
         date_rounded = round_to_hour(date)
         yy, mm, dd, hh = date_rounded.year, date_rounded.month, date_rounded.day, date_rounded.hour
+        time = f"{date_rounded.hour:02}00"
 
         # NOTE Currently the mean latitude and longitude are chosen
         latmin = latmax = self.S1_file.latitude.mean().data*1
@@ -238,13 +239,23 @@ class S1DopplerLeakage:
                 era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str + '.nc' in s][0]
             except:
                 #  if not, try to find single estimate hour ERA5 wind file
-                era5_filename = f"era5{yy}{mm:02d}{dd:02d}.nc"
+                # era5_filename = f"era5{yy}{mm:02d}{dd:02d}.nc"
+                era5_filename = f"era5_{yy}{mm:02d}{dd:02d}h{time}_lat{latmax:.2f}_lon{lonmax:.2f}.nc"
+                era5_filename = era5_filename.replace('.', '_',  2)
                 if not self.era5_directory is None:
                     era5_filename = os.path.join(self.era5_directory, era5_filename)
 
                 # if neither monthly file nor hourly single estimate file exist, download new single estimate hour
                 if not os.path.isfile(era5_filename):
-                    era5_filename = getera5(latmin, latmax, lonmin, lonmax, yy, mm, dd, hh, path=self.era5_directory, retrieve=True)
+                    era5_wind_single_time_loc(year=yy,
+                          month=mm,
+                          day=dd,
+                          time=time,
+                          lat=latmin,
+                          lon=lonmin,
+                          filename=era5_filename,
+                          )
+                    # era5_filename = getera5(latmin, latmax, lonmin, lonmax, yy, mm, dd, hh, path=self.era5_directory, retrieve=True)
             
             print(f"Loading nearest ERA5 point w.r.t. observation from ERA5 file: {era5_filename}")
             era5 = xr.open_dataset(era5_filename)
@@ -254,6 +265,7 @@ class S1DopplerLeakage:
                 longitude= lonmin,
                 latitude = latmin,
                 time = np.datetime64(date_rounded, 'ns'),
+                tolerance=0.5,
                 method = 'nearest')
         self.era5 = era5
         return
@@ -326,7 +338,9 @@ class S1DopplerLeakage:
     
 
     def create_beam_mask(self): 
+        """
 
+        """
         # find indexes along azimuth with beam beam center NOTE does not work squinted
         beam_center = abs(self.data['x_sat'] - self.data['az']).argmin(dim=['az'])['az'].values 
 
@@ -373,7 +387,9 @@ class S1DopplerLeakage:
     
 
     def compute_scatt_eqv_backscatter(self):
+        """
 
+        """
 
         self.data['distance_az'] = (self.data["az"] - self.data["x_sat"]).isel(slow_time = 0)
         self.data['distance_ground'] = calculate_distance(x = self.data['distance_az'], y = self.data["grg"]) 
@@ -405,7 +421,9 @@ class S1DopplerLeakage:
         return
 
     def compute_beam_pattern(self):
+        """
 
+        """
         self.data['distance_slant_range'] = np.sqrt(self.data['distance_ground']**2 + self.z0**2)
         self.data['az_angle_wrt_boresight'] = np.arcsin((self.data['distance_az'])/self.data['distance_slant_range']) # incidence from boresight
         self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.incidence_angle_scat_boresight)
