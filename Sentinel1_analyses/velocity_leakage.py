@@ -44,7 +44,7 @@ from typing import Callable, Union, List, Dict, Any
     # TODO add kwargs to input for phased beam pattern in create_beampattern
 # TODO currently inversion interpolates scatterometer grid size to S1 grid, change to first apply inversion and then interpolate 
 
-# NOTE loading .SAFE often does not work. Needs to be dual pol data
+# NOTE loading .SAFE often does not work. If not, try using dual pol data only (still no guarantee)
 # NOTE Range cell migration not included
 # NOTE weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
 # NOTE nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
@@ -91,6 +91,7 @@ class S1DopplerLeakage:
     scene_size: int = 25_000
     era5_directory: str = "" # directory name containing era5 files to load
     era5_file: Union[bool, str] = False # file name of era5 to load
+    random_state: int = 42
     _denoise: bool = True
 
 
@@ -116,11 +117,11 @@ class S1DopplerLeakage:
         return (longitude + 360) % 360
     
     @staticmethod
-    def speckle_noise(noise_shape: tuple, random_satte: int = 42):
+    def speckle_noise(noise_shape: tuple, random_state: int = 42):
         """
         Generates multiplicative speckle noise with mean value of 1
         """
-        np.random.seed(42)
+        np.random.seed(random_state)
         noise_real = np.random.randn(*noise_shape)
         noise_imag = np.random.randn(*noise_shape)
         noise = np.array([complex(a,b) for a, b in zip(noise_real.ravel(), noise_imag.ravel())])
@@ -497,7 +498,7 @@ class S1DopplerLeakage:
 
         # add speckle noise assuming a single look
         if speckle_noise:
-            noise_multiplier = self.speckle_noise(self.data.nrcs_scat.shape)
+            noise_multiplier = self.speckle_noise(self.data.nrcs_scat.shape, random_state = self.random_state)
         elif not speckle_noise:
             noise_multiplier = 1
 
