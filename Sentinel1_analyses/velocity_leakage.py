@@ -25,6 +25,7 @@ from typing import Callable, Union, List, Dict, Any
 # --------- TODO LIST ------------
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and resolution_spatial can lead to artifacts, maybe interpolation?
+# FIXME find why predicted leakage velocity does not follow same nan clipping
 
 # TODO add option to include geophysical Doppler
 # TODO add land mask filter
@@ -358,12 +359,13 @@ class S1DopplerLeakage:
             data['wdir_wrt_sensor'] = (["az", "grg"], np.ones_like(data.nrcs) * self.wdir_wrt_sensor)
         windfield = cmod5n_inverse(data["nrcs"].data, data['wdir_wrt_sensor'].data, data["inc"].data)
 
+        data['windfield'] = (["az", "grg"], windfield)
+        data["windfield"] = data["windfield"].assign_attrs(units= 'm/s', description = 'CMOD5n Windfield for Sentinel-1 backscatter')
+
         # cmod returns real values even when input is nan, here these are removed
         nrcs_db = 10*np.log10(data.nrcs)
-        # condition = (nrcs_db.isnull()) | (self.S1_file.NRCS_VV == 0).values
-        condition = ((nrcs_db.isnull()) | (data.nrcs == 0))
-        windfield = xr.where(condition, np.nan, windfield)
-        data["windfield"] = windfield.assign_attrs(units= 'm/s', description = 'CMOD5n Windfield for Sentinel-1 backscatter')
+        condition = ((nrcs_db.isnull()) |(data.nrcs == 0))
+        data = data.where(~condition)
 
         # add another dimension for later use
         x_sat = da.arange(data.az.min(), data.az.max(), self.stride)
@@ -384,7 +386,7 @@ class S1DopplerLeakage:
         Creates a new stack of (potentially overlapping) observations centered on a new azimuthmul coordinate system
         """
 
-        # find indexes along azimuth with beam beam center NOTE does not work squinted
+        # find indexes along azimuth with beam beam center NOTE does not work for squinted geometries
         beam_center = abs(self.data['x_sat'] - self.data['az']).argmin(dim=['az'])['az'].values 
 
         # find indxes within allowed beam with over slow time
@@ -510,14 +512,14 @@ class S1DopplerLeakage:
         """
         # compute geometrical doppler, beam pattern and nrcs weigths
         self.data['dop_geom'] = (2 * self.vx_sat * np.sin(self.data['az_angle_wrt_boresight']) / self.Lambda) # eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cummin 
-        self.data['nrcs_weight'] = (self.data['nrcs_scat_eqv'] / self.data['nrcs_scat_eqv'].mean(dim=['az_idx',])) # NOTE weight calculated per azimuth line
+        self.data['nrcs_weight'] = (self.data['nrcs_scat_eqv'] / self.data['nrcs_scat_eqv'].mean(dim=['az_idx'])) # NOTE weight calculated per azimuth line
 
         # compute weighted received Doppler and resulting apparent LOS velocity
         self.data['dop_beam_weighted'] = self.data['dop_geom'] * self.data['beam']* self.data['nrcs_weight']
         self.data['V_leakage'] = self.Lambda * self.data['dop_beam_weighted'] / (2 * np.sin(np.deg2rad(self.data['inc_scatt_eqv']))) # using the equivalent scatterometer incidence angle
 
         # calculate scatt equivalent nrcs
-        self.data['nrcs_scat'] = ((self.data['nrcs'] * self.data['beam']).sum(dim='az_idx') / self.data['beam'].sum(dim='az_idx'))
+        self.data['nrcs_scat'] = ((self.data['nrcs'] * self.data['beam']).sum(dim='az_idx', skipna=False) / self.data['beam'].sum(dim='az_idx'))
 
         # sum over azimuth to receive range-slow_time results
         weight_rg = (self.data['beam'] * self.data['nrcs_weight']).sum(dim='az_idx', skipna=False)
