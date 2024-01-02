@@ -30,14 +30,11 @@ from typing import Callable, Union, List, Dict, Any
 # TODO add land mask filter
 # TODO ugly import from directory up
 # TODO add dask chunking
-# TODO querry era5 per pixel rather than per dataset
-    # NOTE currently the mean ERA5 value is chosen over the entire dataset --> USE CONTINUOUS SCENES ONLY!
-        # TODO assess lekage velovity estimation performance assuming 0-360 reference wind direction 
-    # TODO if high-res era5 wdir is used, wdir_wrt_sensor should be calculated across slow time
 # TODO add docstrings
     # TODO add kwargs to input for phased beam pattern in create_beampattern
 # TODO currently inversion interpolates scatterometer grid size to S1 grid, change to first apply inversion and then interpolate 
 
+# NOTE Calculates assumes rectilinear geometry
 # NOTE loading .SAFE often does not work. If not, try using dual pol data only (still no guarantee)
 # NOTE Range cell migration not included
 # NOTE weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
@@ -89,6 +86,7 @@ class S1DopplerLeakage:
     era5_file: Union[bool, str] = False 
     random_state: int = 42
     _denoise: bool = True
+    _speckle_noise: bool = True
 
 
     def __post_init__(self):
@@ -314,7 +312,7 @@ class S1DopplerLeakage:
         """
         Calculates the wind direction with respect to the sensor using the ground geometry and era5 wind vectors
         """
-        
+
         wdir_era5 = np.rad2deg(np.arctan2(self.era5.u10, self.era5.v10))
 
         # compute ground footprint direction
@@ -536,7 +534,7 @@ class S1DopplerLeakage:
         return
 
 
-    def compute_leakage_velocity_estimate(self, speckle_noise: bool = True):
+    def compute_leakage_velocity_estimate(self):
         """
         Method that estimates the leakage velocity using the scatterometer backscatter field. 
         Can be done more efficeintly
@@ -554,9 +552,9 @@ class S1DopplerLeakage:
         new_inc = np.nan * np.ones_like(self.S1_file.NRCS_VV)
 
         # add speckle noise assuming a single look
-        if speckle_noise:
+        if self._speckle_noise:
             noise_multiplier = self.speckle_noise(self.data.nrcs_scat.shape, random_state = self.random_state)
-        elif not speckle_noise:
+        elif not self._speckle_noise:
             noise_multiplier = 1
 
         single_look_nrcs = noise_multiplier * self.data.nrcs_scat
@@ -614,7 +612,7 @@ class S1DopplerLeakage:
         self.compute_scatt_eqv_backscatter()
         self.compute_beam_pattern(**kwargs)
         self.compute_leakage_velocity(**kwargs)
-        self.compute_leakage_velocity_estimate(**kwargs)
+        self.compute_leakage_velocity_estimate()
 
         self.data[data_to_return] = self.data[data_to_return].chunk('auto').compute()
         return
