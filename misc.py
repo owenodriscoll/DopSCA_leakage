@@ -79,7 +79,7 @@ def era5_wind_monthly(year, month, directory = ''):
     return
     
 
-def era5_wind_single_time_loc(year, month, day, time, lat, lon, filename):
+def era5_wind_point(year, month, day, time, lat, lon, filename):
     """
     add trailing '/' to directory
     """
@@ -98,6 +98,31 @@ def era5_wind_single_time_loc(year, month, day, time, lat, lon, filename):
             'day': str(day),
             'time': str(time),
             'area': [lat, lon, lat, lon],
+        },
+        f'{filename}')
+    return
+
+def era5_wind_area(year, month, day, time, latmax, lonmin, latmin, lonmax, filename):
+    """
+    add trailing '/' to directory
+
+    Downloads ERA5 data for an area given a specific time and extent
+    """
+    import cdsapi
+    c = cdsapi.Client()
+    c.retrieve(
+        'reanalysis-era5-single-levels',
+        {
+            'product_type': 'reanalysis',
+            'format': 'netcdf',
+            'variable': [
+                'temperature', '10m_u_component_of_wind', '10m_v_component_of_wind',
+            ],
+            'year': str(year),
+            'month': str(month),
+            'day': str(day),
+            'time': str(time),
+            'area': [latmax, lonmin, latmin, lonmax],
         },
         f'{filename}')
     return
