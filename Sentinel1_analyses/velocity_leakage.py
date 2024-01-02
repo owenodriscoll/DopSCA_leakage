@@ -7,22 +7,16 @@ import copy
 import pyproj
 import warnings
 import numpy as np
-import scipy as sp
-from matplotlib import pyplot as plt
 import xarray as xr
-import xarray_sentinel
 import dask.array as da
-import drama.utils as drtls
-import s1sea.geo_plot as gplt
 from s1sea.cmod5n import cmod5n_inverse, cmod5n_forward
-from s1sea.get_era5 import getera5
 from s1sea.s1_preprocess import grd_to_nrcs
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 
 # FIXME fix this
 # importing from one directory  up
 sys.path.insert(0, "../" )
-from misc import round_to_hour, angular_difference, calculate_distance  
+from misc import round_to_hour, angular_difference, calculate_distance, era5_wind_single_time_loc
 
 from dataclasses import dataclass
 from typing import Callable, Union, List, Dict, Any
@@ -34,17 +28,17 @@ from typing import Callable, Union, List, Dict, Any
 
 # TODO add option to include geophysical Doppler
 # TODO add land mask filter
-# TODO add warning when chosen ERA5 value is far spatially or temporally
-# TODO include for and aft viewing geometry in addition to mid, to obtain mutliple velocity vectors
 # TODO ugly import from directory up
 # TODO add dask chunking
 # TODO querry era5 per pixel rather than per dataset
     # NOTE currently the mean ERA5 value is chosen over the entire dataset --> USE CONTINUOUS SCENES ONLY!
+        # TODO assess lekage velovity estimation performance assuming 0-360 reference wind direction 
     # TODO if high-res era5 wdir is used, wdir_wrt_sensor should be calculated across slow time
 # TODO add docstrings
-# TODO create a second xarray dataset object after removing objects outside beam pattern
+    # TODO add kwargs to input for phased beam pattern in create_beampattern
+# TODO currently inversion interpolates scatterometer grid size to S1 grid, change to first apply inversion and then interpolate 
 
-# NOTE loading .SAFE often does not work. Needs to be dual pol data
+# NOTE loading .SAFE often does not work. If not, try using dual pol data only (still no guarantee)
 # NOTE Range cell migration not included
 # NOTE weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
 # NOTE nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
@@ -52,8 +46,6 @@ from typing import Callable, Union, List, Dict, Any
 
 # constants
 c = 3E8
-
-
 
 
 @dataclass
@@ -67,6 +59,11 @@ class S1DopplerLeakage:
     length_antenna: float;
     height_antenna: float;
     beam_pattern: str; choose from ["sinc", "phased_array"], determines the beam width and side-lobe sensitivity
+    incidence_angle_scat: float; incidence angle of scatterometer at first ground range (determines ground range distance)
+    incidence_angle_scat_boresight: float; boresight incidence angle of scatterometer 
+    vx_sat: int; along-azimuthal velocity of satellite, in meters per second
+    PRF: int; pulse repetition frequency
+    az_mask_cutoff: int; along azimuth beam footprint to consider per pulse (outside is clipped off), in meters
     era5_directory: str; directory containing era5 file. Will look for file containing "{yyyy}{mm}.nc" or "era5{yy}{mm}{dd}.nc" to load
     era5_file: str; specific file to load
 
@@ -80,8 +77,7 @@ class S1DopplerLeakage:
     z0: float = 700E3
     length_antenna: float = 3.2
     height_antenna: float = 0.3
-    beam_pattern: str = "sinc" # ["sinc", "phased_array"]
-    beam_weight_in_scene: float = 0.9995 # fraction of the beam weigths within scene
+    beam_pattern: str = "sinc" 
     incidence_angle_scat: float = 40
     incidence_angle_scat_boresight: float = 45
     vx_sat: int = 6800 
@@ -89,8 +85,9 @@ class S1DopplerLeakage:
     az_mask_cutoff: int = 80_000 # m # two sided
     resolution_spatial: int = 340 # m # 
     scene_size: int = 25_000
-    era5_directory: str = "" # directory name containing era5 files to load
-    era5_file: Union[bool, str] = False # file name of era5 to load
+    era5_directory: str = "" 
+    era5_file: Union[bool, str] = False 
+    random_state: int = 42
     _denoise: bool = True
 
 
@@ -114,6 +111,21 @@ class S1DopplerLeakage:
     @staticmethod
     def convert_to_0_360(longitude):
         return (longitude + 360) % 360
+    
+    @staticmethod
+    def speckle_noise(noise_shape: tuple, random_state: int = 42):
+        """
+        Generates multiplicative speckle noise for intensity (i.e. squared) with mean value of 1
+
+        Assumes Gaussian noise for real and imaginary components and uniform phase
+        """
+        np.random.seed(random_state)
+        noise_real = np.random.randn(*noise_shape)
+        noise_imag = np.random.randn(*noise_shape)
+        noise = np.array([complex(a,b) for a, b in zip(noise_real.ravel(), noise_imag.ravel())])
+        noise = (abs(noise)**2)/2
+
+        return noise.reshape(noise_shape)
 
 
     # TODO add chunking
@@ -202,12 +214,15 @@ class S1DopplerLeakage:
 
     def querry_era5(self):
         """
-
+        Open or download relevant ERA5 data. Will first attempt to load a specific file (if provided).
+        Otherwise will check if previously downloaded file covers area of interest. Lastely, will submit new download request.
+        Nearest datapoint is retrieved from era5 file with a tolerance of 0.5.
         """
 
         date = self.S1_file.azimuth_time.min().values.astype('datetime64[m]').astype(object)
         date_rounded = round_to_hour(date)
         yy, mm, dd, hh = date_rounded.year, date_rounded.month, date_rounded.day, date_rounded.hour
+        time = f"{date_rounded.hour:02}00"
 
         # NOTE Currently the mean latitude and longitude are chosen
         latmin = latmax = self.S1_file.latitude.mean().data*1
@@ -219,16 +234,24 @@ class S1DopplerLeakage:
             sub_str = str(yy) + str(mm)
             try:
                 # try to find if monthly data file exists which to load 
-                era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str + 'nc' in s][0]
+                era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str + '.nc' in s][0]
             except:
                 #  if not, try to find single estimate hour ERA5 wind file
-                era5_filename = f"era5{yy}{mm:02d}{dd:02d}.nc"
+                era5_filename = f"era5_{yy}{mm:02d}{dd:02d}h{time}_lat{latmax:.2f}_lon{lonmax:.2f}.nc"
+                era5_filename = era5_filename.replace('.', '_',  2)
                 if not self.era5_directory is None:
                     era5_filename = os.path.join(self.era5_directory, era5_filename)
 
                 # if neither monthly file nor hourly single estimate file exist, download new single estimate hour
                 if not os.path.isfile(era5_filename):
-                    era5_filename = getera5(latmin, latmax, lonmin, lonmax, yy, mm, dd, hh, path=self.era5_directory, retrieve=True)
+                    era5_wind_single_time_loc(year=yy,
+                          month=mm,
+                          day=dd,
+                          time=time,
+                          lat=latmin,
+                          lon=lonmin,
+                          filename=era5_filename,
+                          )
             
             print(f"Loading nearest ERA5 point w.r.t. observation from ERA5 file: {era5_filename}")
             era5 = xr.open_dataset(era5_filename)
@@ -238,6 +261,7 @@ class S1DopplerLeakage:
                 longitude= lonmin,
                 latitude = latmin,
                 time = np.datetime64(date_rounded, 'ns'),
+                tolerance = 0.5,
                 method = 'nearest')
         self.era5 = era5
         return
@@ -245,7 +269,7 @@ class S1DopplerLeakage:
 
     def wdir_from_era5(self):
         """
-
+        Calculates the wind direction with respect to the sensor using the ground geometry and era5 wind vectors
         """
 
         # extract wind vectors
@@ -263,22 +287,23 @@ class S1DopplerLeakage:
         return
 
 
-    def create_dataset(self):
+    def create_dataset(self, var_nrcs: str = "NRCS_VV", var_inc: str = "inc"):
         """
-
+        Creates a new xarray dataset with the coordinates and dimensions of interest using the Sentinel-1 data. 
+        Computes the windfield given the Sentinel-1 and ERA5 data
         """  
 
         # calculate new ground range and azimuth range belonging to observation with scatterometer viewing geometry
         grg_offset = np.tan(np.deg2rad(self.incidence_angle_scat)) * self.z0
-        grg = np.arange(self.S1_file.NRCS_VV.data.shape[1]) * self.resolution_spatial + grg_offset
-        az = (np.arange(self.S1_file.NRCS_VV.data.shape[0]) - self.S1_file.NRCS_VV.data.shape[0]//2) * self.resolution_spatial
+        grg = np.arange(self.S1_file[var_nrcs].data.shape[1]) * self.resolution_spatial + grg_offset
+        az = (np.arange(self.S1_file[var_nrcs].data.shape[0]) - self.S1_file[var_nrcs].data.shape[0]//2) * self.resolution_spatial
         x_sat = np.arange(az.min(), az.max(), self.stride)
 
         # create new dataset 
         data = xr.Dataset(
             data_vars=dict(
-                nrcs = (["az", "grg"], self.S1_file.NRCS_VV.data, {'units': 'm2/m2'}),
-                inc = (["az", "grg"], self.S1_file.inc.data, {'units': 'Degrees'}),
+                nrcs = (["az", "grg"], self.S1_file[var_nrcs].data, {'units': 'm2/m2'}),
+                inc = (["az", "grg"], self.S1_file[var_inc].data, {'units': 'Degrees'}),
             ),
             coords=dict(
                 az = (["az"], az, {'units': 'm'}),
@@ -310,6 +335,10 @@ class S1DopplerLeakage:
     
 
     def create_beam_mask(self): 
+        """
+        Function to remove data outside beam pattern footprint as determined by "az_mask_pixels_cutoff". 
+        Creates a new stack of (potentially overlapping) observations centered on a new azimuthmul coordinate system
+        """
 
         # find indexes along azimuth with beam beam center NOTE does not work squinted
         beam_center = abs(self.data['x_sat'] - self.data['az']).argmin(dim=['az'])['az'].values 
@@ -357,7 +386,9 @@ class S1DopplerLeakage:
     
 
     def compute_scatt_eqv_backscatter(self):
-
+        """
+        From the submitted viewing geometry, calculates the nrcs as would be observed by the scatterometer
+        """
 
         self.data['distance_az'] = (self.data["az"] - self.data["x_sat"]).isel(slow_time = 0)
         self.data['distance_ground'] = calculate_distance(x = self.data['distance_az'], y = self.data["grg"]) 
@@ -366,11 +397,12 @@ class S1DopplerLeakage:
         self.data['inc_scatt_eqv_cube'] = self.data['inc_scatt_eqv'].expand_dims(dim={"slow_time": slow_time_vector})
 
         self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
-        self.data = self.data.unify_chunks()
+        self.data = self.data.astype('float32').unify_chunks()
 
         def windfield_over_slow_time(ds, dimensions = ['az_idx', 'grg', 'slow_time']):
             """
-
+            Wrapper of CMOD5.n to enable dask's lazy computations
+            
             input
             -----
             ds: xr.Dataset, dataset containing the fields 'windfield', 'inc_scatt_eqv' and the attribute 'wdir_wrt_sensor'
@@ -384,20 +416,32 @@ class S1DopplerLeakage:
             nrcs_scatterometer_equivalent = cmod5n_forward(ds['windfield'].data, ds.attrs['wdir_wrt_sensor'], ds['inc_scatt_eqv_cube'].data)
             ds['nrcs_scat_eqv'] = (dimensions, nrcs_scatterometer_equivalent, {'units': 'm/s'}) 
             return ds
-        
 
         self.data = self.data.map_blocks(windfield_over_slow_time)
+        self.data = self.data.astype('float32')
         return
 
-    def compute_beam_pattern(self):
 
+    def compute_beam_pattern(self, antenna_elements = 10, antenna_weighting = 0.5):
+        """
+        Computes a beam pattern to be applied along the entire dataset.
+        NOTE assumes similar antenna parameters for both range and azimuth
+
+        Input
+        -----
+        antenna_elements int; number of anetenna elements that are considered in beam tapering
+        antenna_weighting: float, int; weighting parameter as defined by the called beam pattern functions
+        """
+        
         self.data['distance_slant_range'] = np.sqrt(self.data['distance_ground']**2 + self.z0**2)
         self.data['az_angle_wrt_boresight'] = np.arcsin((self.data['distance_az'])/self.data['distance_slant_range']) # incidence from boresight
         self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.incidence_angle_scat_boresight)
         self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
 
-        N = 10 # number of antenna elements
-        w = 0.5 # complex weighting of elements
+        # NOTE the following computations are directly computed, a delayed lazy computation may be better
+        # NOTE Currently assumes some antenna elements and weighting in range as in azimuth 
+        N = antenna_elements 
+        w = antenna_weighting 
         beam_az_tx = sinc_bp(sin_angle=self.data.az_angle_wrt_boresight, L = self.length_antenna, f0 = self.f0)
 
         if self.beam_pattern == "sinc":
@@ -410,14 +454,16 @@ class S1DopplerLeakage:
         beam_grg_rx = beam_grg_tx
         beam_grg = beam_grg_tx * beam_grg_rx
         beam = beam_az * beam_grg
-        self.data['beam'] = (['az_idx', 'grg'], beam)
+        self.data['beam'] = ([*self.data.az_angle_wrt_boresight.dims], beam)
 
-        self.data = self.data.astype('float32').unify_chunks()
+        self.data = self.data.astype('float32')
 
         return
 
-    def compute_Doppler_leakage(self):
-
+    def compute_leakage_velocity(self):
+        """
+        Computes leakage velocity considering the beam pattern, nrcs weighting and geometric Doppler
+        """
         # compute geometrical doppler, beam pattern and nrcs weigths
         self.data['dop_geom'] = (2 * self.vx_sat * np.sin(self.data['az_angle_wrt_boresight']) / self.Lambda) # eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cummin 
         self.data['nrcs_weight'] = (self.data['nrcs_scat_eqv'] / self.data['nrcs_scat_eqv'].mean(dim=['az_idx',])) # NOTE weight calculated per azimuth line
@@ -434,16 +480,86 @@ class S1DopplerLeakage:
         receive_rg = self.data[['dop_beam_weighted', 'V_leakage']].sum(dim='az_idx', skipna=False)
         self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = receive_rg / weight_rg
         
-        # add attributes and coarsen data to resolution of subscenes
+        # add attribute
         self.data['V_leakage_pulse_rg'] = self.data['V_leakage_pulse_rg'].assign_attrs(units= 'm/s', description = 'Line of sight velocity ')
-        # self.subscenes = self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']].coarsen(grg=self.grg_N, slow_time=self.slow_time_N, boundary='trim').mean(skipna=False) 
-        self.data[['doppler_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene', 'nrcs_scat_subscene']] = self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
-        data_to_return = ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene', 'nrcs_scat_subscene']
-        self.data[data_to_return] = self.data[data_to_return].compute()
+
+        # low-pass filter scatterometer data to subscene resolution
+        data_4subscene = ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']
+        data_subscene = [name + '_subscene' for name in data_4subscene]
+        self.data[data_subscene] = self.data[data_4subscene].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
         return
 
 
-    def apply(self, **kwargs):
+    def compute_leakage_velocity_estimate(self, speckle_noise: bool = True):
+        """
+        Method that estimates the leakage velocity using the scatterometer backscatter field. 
+        Can be done more efficeintly
+
+        Input
+        -----
+        speckle_noise: bool; whether to apply multiplicative speckle noise to scatterometer estimated nrcs
+        """
+        # find indexes of S1 scene that were cropped (outside full beam pattern)
+        idx_start = self.idx_az[0][self.az_mask_pixels_cutoff]
+        idx_end = self.idx_az[-1][self.az_mask_pixels_cutoff]
+
+        # create placeholder S1 data (pre-cropped)
+        new_nrcs = np.nan * np.ones_like(self.S1_file.NRCS_VV)
+        new_inc = np.nan * np.ones_like(self.S1_file.NRCS_VV)
+
+        # add speckle noise assuming a single look
+        if speckle_noise:
+            noise_multiplier = self.speckle_noise(self.data.nrcs_scat.shape, random_state = self.random_state)
+        elif not speckle_noise:
+            noise_multiplier = 1
+
+        single_look_nrcs = noise_multiplier * self.data.nrcs_scat
+
+        # interpolate estimated scatterometer data back to S1 grid size
+        slow_time_upsamp = np.linspace(self.data.slow_time[0], self.data.slow_time[-1], idx_end - idx_start) 
+        nrcs_scat_upsamp = single_look_nrcs.T.interp(slow_time = slow_time_upsamp)
+        inc_scat_upsamp = self.data.inc_scatt_eqv_cube.mean(dim='az_idx').T.interp(slow_time = slow_time_upsamp)
+
+        # apply cropping 
+        new_nrcs[idx_start: idx_end, :] = nrcs_scat_upsamp
+        new_inc[idx_start: idx_end, :] = inc_scat_upsamp
+
+        # copy existing object to avoid overwritting
+        self_copy = copy.deepcopy(self)
+
+        # replace real S1 data with scatterometer data interpolated to S1
+        self_copy.S1_file['NRCS_VV'] = (['azimuth_time', 'ground_range'], new_nrcs)
+        self_copy.S1_file['inc'] = (['azimuth_time', 'ground_range'], new_inc)
+
+        # define names of variables to consider and return
+        data_to_return = ['doppler_pulse_rg', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg', 'V_leakage_pulse_rg_subscene', 'nrcs_scat', 'nrcs_scat_subscene']
+        data_to_return_new_names = [name + '_inverted' for name in data_to_return[:-2]] + ['nrcs_scat_w_noise', 'nrcs_scat_subscene_w_noise']
+        
+        # repeat the  previous chain of computations NOTE this could be done more efficiently
+        self_copy.create_dataset()
+        self_copy.create_beam_mask()
+        self_copy.compute_scatt_eqv_backscatter()
+        self_copy.compute_beam_pattern()
+        self_copy.compute_leakage_velocity()
+
+        # add estimated leakage velocity back to original object
+        self.data[data_to_return_new_names] = self_copy.data[data_to_return]
+        return 
+
+
+    def apply(self, 
+              data_to_return: list[str] = 
+                                ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 
+                                 'doppler_pulse_rg_subscene', 'doppler_pulse_rg_subscene_inverted',
+                                 'V_leakage_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene_inverted',
+                                 'nrcs_scat_subscene', 'doppler_pulse_rg_inverted',
+                                 'V_leakage_pulse_rg_inverted', 'nrcs_scat_w_noise',
+                                 'nrcs_scat_subscene_w_noise'],
+                **kwargs):
+        """
+        Calls relevant methods in correct order and performs final computations after dask's lazy computations
+        """
+
         self.open_data()
         self.querry_era5()
         self.wdir_from_era5()
@@ -451,9 +567,17 @@ class S1DopplerLeakage:
         self.create_beam_mask()
         self.compute_scatt_eqv_backscatter()
         self.compute_beam_pattern(**kwargs)
-        self.compute_Doppler_leakage()
+        self.compute_leakage_velocity(**kwargs)
+        self.compute_leakage_velocity_estimate(**kwargs)
+
+        self.data[data_to_return] = self.data[data_to_return].chunk('auto').compute()
         return
     
+
+
+
+
+
 
 
 
@@ -464,7 +588,7 @@ class S1DopplerLeakage:
         self.data['distance_ground'] = calculate_distance(x = self.data['distance_az'], y = self.data["grg"]) 
         self.data['inc_scatt_eqv'] = np.rad2deg(np.arctan(self.data['distance_ground']/self.z0))
 
-        self.data = self.data.unify_chunks()
+        # self.data = self.data.unify_chunks()
 
         @dask.delayed
         def cmod_delayed(coord_value):

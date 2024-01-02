@@ -14,11 +14,13 @@ def round_to_hour(dt):
 
     return dt
 
+
 def normalize_angle(angle):
     """
     Normalize the angle to be between -180 and 180 degrees.
     """
     return (angle + 180) % 360 - 180
+
 
 def angular_difference(a, b):
     """
@@ -32,12 +34,12 @@ def angular_difference(a, b):
 
     return diff
 
+
 def calculate_distance(x, y, x0=0 , y0=0):
     return np.sqrt((x - x0) ** 2 + (y - y0 ) ** 2)
 
 
-
-def era5_wind_monthly(year, month, directory = None):
+def era5_wind_monthly(year, month, directory = ''):
     import cdsapi
     c = cdsapi.Client()
     c.retrieve(
@@ -74,3 +76,28 @@ def era5_wind_monthly(year, month, directory = None):
             ],
         },
         f'{directory}era5_wind_{str(year)+str(month)}.nc')
+    return
+    
+
+def era5_wind_single_time_loc(year, month, day, time, lat, lon, filename):
+    """
+    add trailing '/' to directory
+    """
+    import cdsapi
+    c = cdsapi.Client()
+    c.retrieve(
+        'reanalysis-era5-single-levels',
+        {
+            'product_type': 'reanalysis',
+            'format': 'netcdf',
+            'variable': [
+                'temperature', '10m_u_component_of_wind', '10m_v_component_of_wind',
+            ],
+            'year': str(year),
+            'month': str(month),
+            'day': str(day),
+            'time': str(time),
+            'area': [lat, lon, lat, lon],
+        },
+        f'{filename}')
+    return
