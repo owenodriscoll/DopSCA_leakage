@@ -16,7 +16,7 @@ from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 # FIXME fix this
 # importing from one directory  up
 sys.path.insert(0, "../" )
-from misc import round_to_hour, angular_difference, calculate_distance, era5_wind_single_time_loc
+from misc import round_to_hour, angular_difference, calculate_distance, era5_wind_point, era5_wind_area
 
 from dataclasses import dataclass
 from typing import Callable, Union, List, Dict, Any
@@ -214,19 +214,27 @@ class S1DopplerLeakage:
 
     def querry_era5(self):
         """
-        Open or download relevant ERA5 data. Will first attempt to load a specific file (if provided).
-        Otherwise will check if previously downloaded file covers area of interest. Lastely, will submit new download request.
-        Nearest datapoint is retrieved from era5 file with a tolerance of 0.5.
+        Opens or downloads relevant ERA5 data to find the wind direction w.r.t. to the radar. 
+        1. Will first attempt to load a specific file (if provided).
+        2. Otherwise will check if previously downloaded file covers area of interest. 
+        3. Lastely, will submit new download request.
+        
+        This method can be skipped by manually providing a "wdir_wrt_sensor" attribute to "self".
+        Either an integer/float as an average over the area of interest, or an array, in which case the
+        array must be the same shape as the backscatter array in the S1_file.
         """
 
         date = self.S1_file.azimuth_time.min().values.astype('datetime64[m]').astype(object)
         date_rounded = round_to_hour(date)
         yy, mm, dd, hh = date_rounded.year, date_rounded.month, date_rounded.day, date_rounded.hour
-        time = f"{date_rounded.hour:02}00"
+        time = f"{hh:02}00"
 
-        # NOTE Currently the mean latitude and longitude are chosen
-        latmin = latmax = self.S1_file.latitude.mean().data*1
-        lonmin = lonmax = self.convert_to_0_360(self.S1_file.longitude).mean().data*1 # NOTE correction for fact that ERA5 goes between 0 - 360
+        latitudes = self.S1_file.latitude
+        longitudes = self.S1_file.longitude
+        latmean, lonmean = latitudes.mean().data*1, longitudes.mean().data*1
+        latmin, latmax = latitudes.min().data*1, latitudes.max().data*1
+        lonmin, lonmax = longitudes.min().data*1, longitudes.max().data*1
+        lonmin, lonmax = [self.convert_to_0_360(i) for i in [lonmin, lonmax]] # NOTE correction for fact that ERA5 goes between 0 - 360
 
         if type(self.era5_file) == str:
             era5 = xr.open_dataset(self.era5_file)
@@ -237,33 +245,68 @@ class S1DopplerLeakage:
                 era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str + '.nc' in s][0]
             except:
                 #  if not, try to find single estimate hour ERA5 wind file
-                era5_filename = f"era5_{yy}{mm:02d}{dd:02d}h{time}_lat{latmax:.2f}_lon{lonmax:.2f}.nc"
+                era5_filename = f"era5_{yy}{mm:02d}{dd:02d}h{time}_lat{latmean:.2f}_lon{lonmean:.2f}.nc"
                 era5_filename = era5_filename.replace('.', '_',  2)
                 if not self.era5_directory is None:
                     era5_filename = os.path.join(self.era5_directory, era5_filename)
 
                 # if neither monthly file nor hourly single estimate file exist, download new single estimate hour
                 if not os.path.isfile(era5_filename):
-                    era5_wind_single_time_loc(year=yy,
+                    era5_wind_area(year=yy,
                           month=mm,
                           day=dd,
                           time=time,
-                          lat=latmin,
-                          lon=lonmin,
+                          lonmin = lonmin,
+                          lonmax = lonmax,
+                          latmin = latmin,
+                          latmax = latmax,
                           filename=era5_filename,
                           )
             
             print(f"Loading nearest ERA5 point w.r.t. observation from ERA5 file: {era5_filename}")
             era5 = xr.open_dataset(era5_filename)
+            
+        era5_subset_time = era5.sel(
+            time = np.datetime64(date_rounded, 'ns'),
+            method = 'nearest')
 
-        # TODO add check that nearest is not too far of spatially or temporally
-        era5 = era5.sel(
-                longitude= lonmin,
-                latitude = latmin,
-                time = np.datetime64(date_rounded, 'ns'),
-                tolerance = 0.5,
-                method = 'nearest')
-        self.era5 = era5
+        era5_subset = era5_subset_time.sel(
+            longitude = self.convert_to_0_360(self.S1_file.longitude),
+            latitude = self.S1_file.latitude,
+            method = 'nearest')
+
+        # ERA5 data is subsampled
+        # this should not affect resolution as, for example, the resolution of 1/4 deg ERA5 is approx 50km, 
+        # The resampled grid size should still be << 50km (S1 resolution * smoothing_window * undersample_factor << 50)
+        smoothing_window = 10
+        undersample_factor = 10
+        resolution_condition = self.resolution_spatial * undersample_factor * smoothing_window
+
+        # check whether resampling is unacceptable
+        # resolution is ideally twice the grid spacing and 1 degree is approximately 100km
+        resolution_era5_deg = 2 * min([abs(era5.latitude.diff(dim = 'latitude')).min(), abs(era5.longitude.diff(dim = 'longitude')).min()])
+        resolution_era5_m = 100e3 * resolution_era5_deg 
+        message = "Warning: ERA5 resolution diminished by too much smoothing. \nConsider decreasing the resampling undersample factor or the window size."
+        if resolution_condition >= resolution_era5_m:
+            print(message)
+
+        # create a placeholder dataset to avoid having to subsample/oversample on datetime vectors
+        azimuth_time_placeholder = np.arange(era5_subset.dims['azimuth_time'])
+        ground_range_placeholder = np.arange(era5_subset.dims['ground_range'])
+        era5_placeholder = era5_subset.assign_coords(azimuth_time=azimuth_time_placeholder, ground_range=ground_range_placeholder)
+
+        # Subsample the dataset by interpolation
+        new_azimuth_time = np.arange(era5_subset.dims['azimuth_time']/undersample_factor) * undersample_factor
+        new_ground_range = np.arange(era5_subset.dims['ground_range']/undersample_factor) * undersample_factor
+        era5_subsamp = era5_placeholder.interp(azimuth_time=new_azimuth_time, ground_range=new_ground_range, method='linear')
+
+        # first perform median filter (performs better if anomalies are present),then mean filter to smooth edges
+        era5_smoothed = era5_subsamp.rolling(azimuth_time = smoothing_window, ground_range = smoothing_window, center = True, min_periods=2).median()
+        era5_smoothed = era5_smoothed.rolling(azimuth_time = smoothing_window, ground_range = smoothing_window, center = True, min_periods=2).mean()
+
+        # re-interpolate to the native resolution and add to object
+        era5_interp = era5_smoothed.interp(azimuth_time=azimuth_time_placeholder, ground_range=ground_range_placeholder, method='linear')
+        self.era5 = era5_interp.assign_coords(azimuth_time=era5_subset.azimuth_time, ground_range=era5_subset.ground_range)
         return
 
 
@@ -271,16 +314,13 @@ class S1DopplerLeakage:
         """
         Calculates the wind direction with respect to the sensor using the ground geometry and era5 wind vectors
         """
+        
+        wdir_era5 = np.rad2deg(np.arctan2(self.era5.u10, self.era5.v10))
 
-        # extract wind vectors
-        u10, v10 = np.ravel(self.era5.u10.values*1)[0], np.ravel(self.era5.v10.values*1)[0]
-        wdir_era5 = np.rad2deg(np.arctan2(u10, v10))
-
-        # Compute orientation of observation
-        # FIXME do not load all values, only load exact indixes needed 
-        lats, lons = self.S1_file.latitude.values, self.S1_file.longitude.values  # FIXME
+        # compute ground footprint direction
         geodesic = pyproj.Geod(ellps='WGS84')
-        ground_dir, _, _ = geodesic.inv(lons[0, 0], lats[0, 0], lons[-1,0], lats[-1,0])
+        corner_coords = [self.S1_file.longitude[0, 0], self.S1_file.latitude[0, 0], self.S1_file.longitude[-1,0], self.S1_file.latitude[-1,0]]
+        ground_dir, _, _ = geodesic.inv(*corner_coords)
 
         # compute directional difference between satelite and era5 wind direction
         self.wdir_wrt_sensor = angular_difference(ground_dir, wdir_era5)
@@ -310,16 +350,22 @@ class S1DopplerLeakage:
                 grg = (["grg"], grg, {'units': 'm'}),
             ),
             attrs=dict(
-                wdir_wrt_sensor = self.wdir_wrt_sensor,
-                resolution_spatial= self.resolution_spatial),
+                resolution_spatial = self.resolution_spatial),
         )
 
         # add windfield
-        windfield = cmod5n_inverse(data["nrcs"].values, data.wdir_wrt_sensor, data["inc"].values)
+        if isinstance(self.wdir_wrt_sensor, xr.DataArray):
+            data['wdir_wrt_sensor'] = (["az", "grg"], self.wdir_wrt_sensor.data)
+        elif isinstance(self.wdir_wrt_sensor, (float, int)):
+            data['wdir_wrt_sensor'] = (["az", "grg"], np.ones_like(data.nrcs) * self.wdir_wrt_sensor)
+        windfield = cmod5n_inverse(data["nrcs"].data, data['wdir_wrt_sensor'].data, data["inc"].data)
 
-        # for some reason cmod still returns a value even when input is nan, here these are removed
-        self.windfield = xr.where(data.nrcs.isnull(), np.nan, windfield)
-        data["windfield"] = self.windfield.assign_attrs(units= 'm/s', description = 'CMOD5n Windfield for Sentinel-1 backscatter')
+        # cmod returns real values even when input is nan, here these are removed
+        nrcs_db = 10*np.log10(data.nrcs)
+        # condition = (nrcs_db.isnull()) | (self.S1_file.NRCS_VV == 0).values
+        condition = ((nrcs_db.isnull()) | (data.nrcs == 0))
+        windfield = xr.where(condition, np.nan, windfield)
+        data["windfield"] = windfield.assign_attrs(units= 'm/s', description = 'CMOD5n Windfield for Sentinel-1 backscatter')
 
         # add another dimension for later use
         x_sat = da.arange(data.az.min(), data.az.max(), self.stride)
@@ -413,7 +459,7 @@ class S1DopplerLeakage:
             ds: xr.Dataset, dataset containing a new variable 'nrcs_scat_eqv'
             """
 
-            nrcs_scatterometer_equivalent = cmod5n_forward(ds['windfield'].data, ds.attrs['wdir_wrt_sensor'], ds['inc_scatt_eqv_cube'].data)
+            nrcs_scatterometer_equivalent = cmod5n_forward(ds['windfield'].data, ds['wdir_wrt_sensor'].data, ds['inc_scatt_eqv_cube'].data)
             ds['nrcs_scat_eqv'] = (dimensions, nrcs_scatterometer_equivalent, {'units': 'm/s'}) 
             return ds
 
