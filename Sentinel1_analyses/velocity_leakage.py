@@ -25,7 +25,6 @@ from typing import Callable, Union, List, Dict, Any
 # --------- TODO LIST ------------
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and resolution_spatial can lead to artifacts, maybe interpolation?
-# FIXME find why predicted leakage velocity does not follow same nan clipping
 
 # TODO add option to include geophysical Doppler
 # TODO add land mask filter
@@ -35,12 +34,14 @@ from typing import Callable, Union, List, Dict, Any
     # TODO add kwargs to input for phased beam pattern in create_beampattern
 # TODO currently inversion interpolates scatterometer grid size to S1 grid, change to first apply inversion and then interpolate 
 
-# NOTE Calculates assumes rectilinear geometry
-# NOTE loading .SAFE often does not work. If not, try using dual pol data only (still no guarantee)
+# NOTE Calculations assume a rectilinear geometry with no squint
+# NOTE Loading .SAFE often does not work. If not, try using dual pol data only (still no guarantee)
 # NOTE Range cell migration not included
-# NOTE weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
-# NOTE nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
-
+# NOTE Weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
+# NOTE Nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
+# NOTE Assumes square Sentinel-1 pixels. The following processes rely on square pixels
+    # NOTE ERA5 data is resampled to Sentinel-1 grid size and then smoothed
+    # NOTE calculation of az_mask_pixels_cutoff, grg_N, slow_time_N
 
 # constants
 c = 3E8
@@ -56,7 +57,7 @@ class S1DopplerLeakage:
     z0: float; average satellite orbit height in meters
     length_antenna: float;
     height_antenna: float;
-    beam_pattern: str; choose from ["sinc", "phased_array"], determines the beam width and side-lobe sensitivity
+    beam_pattern: str; Determines the beam width and side-lobe sensitivity
     incidence_angle_scat: float; incidence angle of scatterometer at first ground range (determines ground range distance)
     incidence_angle_scat_boresight: float; boresight incidence angle of scatterometer 
     vx_sat: int; along-azimuthal velocity of satellite, in meters per second
@@ -64,7 +65,8 @@ class S1DopplerLeakage:
     az_mask_cutoff: int; along azimuth beam footprint to consider per pulse (outside is clipped off), in meters
     era5_directory: str; directory containing era5 file. Will look for file containing "{yyyy}{mm}.nc" or "era5{yy}{mm}{dd}.nc" to load
     era5_file: str; specific file to load
-
+    era5_undersample_factor: int; factor by which to coarsen era5 resolution (after interpolating to resolution_spatial)
+    era5_smoothing_window: int; window size for smoothing coarsened interpolated era5 data
     Output:
     -------
 
@@ -85,6 +87,8 @@ class S1DopplerLeakage:
     scene_size: int = 25_000
     era5_directory: str = "" 
     era5_file: Union[bool, str] = False 
+    era5_undersample_factor: int = 10
+    era5_smoothing_window: int = 15
     random_state: int = 42
     _denoise: bool = True
     _speckle_noise: bool = True
@@ -251,15 +255,15 @@ class S1DopplerLeakage:
 
                 # if neither monthly file nor hourly single estimate file exist, download new single estimate hour
                 if not os.path.isfile(era5_filename):
-                    era5_wind_area(year=yy,
-                          month=mm,
-                          day=dd,
-                          time=time,
+                    era5_wind_area(year = yy,
+                          month = mm,
+                          day = dd,
+                          time = time,
                           lonmin = lonmin,
                           lonmax = lonmax,
                           latmin = latmin,
                           latmax = latmax,
-                          filename=era5_filename,
+                          filename = era5_filename,
                           )
             
             print(f"Loading nearest ERA5 point w.r.t. observation from ERA5 file: {era5_filename}")
@@ -275,19 +279,20 @@ class S1DopplerLeakage:
             method = 'nearest')
 
         # ERA5 data is subsampled
-        # this should not affect resolution as, for example, the resolution of 1/4 deg ERA5 is approx 50km, 
-        # The resampled grid size should still be << 50km (S1 resolution * smoothing_window * undersample_factor << 50)
-        smoothing_window = 10
-        undersample_factor = 10
-        resolution_condition = self.resolution_spatial * undersample_factor * smoothing_window
+        # this should not affect resolution much as, for example, the resolution of 1/4 deg ERA5 is approx 50km, 
+        # The resampled grid size should still be ~50km (S1 resolution * era5_smoothing_window * era5_undersample_factor ~ 50km)
+        resolution_condition = self.resolution_spatial * self.era5_undersample_factor * (1 * self.era5_smoothing_window) # NOTE * 1 because only mean window operations considered
 
         # check whether resampling is unacceptable
         # resolution is ideally twice the grid spacing and 1 degree is approximately 100km
         resolution_era5_deg = 2 * min([abs(era5.latitude.diff(dim = 'latitude')).min(), abs(era5.longitude.diff(dim = 'longitude')).min()])
         resolution_era5_m = 100e3 * resolution_era5_deg 
-        message = "Warning: ERA5 resolution diminished by too much smoothing. \nConsider decreasing the resampling undersample factor or the window size."
-        if resolution_condition >= resolution_era5_m:
-            print(message)
+        message = lambda x : f"Warning: interpolated ERA5 data may be {x[0]}. \nConsider plotting fields in self.era5 for inspection and/or {x[1]} the undersample_factor or the smoothing_window size."
+        
+        if resolution_condition >= 1.33 * resolution_era5_m: # arbitrary threshold at which ERA5 resolution may be degraded
+            print(message(['over-smoothed', 'decreasing']))
+        elif resolution_condition <= 0.50 * resolution_era5_m: # arbitrary threshold at which grainy ERA5 is expected (maybe cause artifacts)
+            print(message(['under-smoothed', 'increasing']))
 
         # create a placeholder dataset to avoid having to subsample/oversample on datetime vectors
         azimuth_time_placeholder = np.arange(era5_subset.dims['azimuth_time'])
@@ -295,13 +300,13 @@ class S1DopplerLeakage:
         era5_placeholder = era5_subset.assign_coords(azimuth_time=azimuth_time_placeholder, ground_range=ground_range_placeholder)
 
         # Subsample the dataset by interpolation
-        new_azimuth_time = np.arange(era5_subset.dims['azimuth_time']/undersample_factor) * undersample_factor
-        new_ground_range = np.arange(era5_subset.dims['ground_range']/undersample_factor) * undersample_factor
+        new_azimuth_time = np.arange(era5_subset.dims['azimuth_time']/self.era5_undersample_factor) * self.era5_undersample_factor
+        new_ground_range = np.arange(era5_subset.dims['ground_range']/self.era5_undersample_factor) * self.era5_undersample_factor
         era5_subsamp = era5_placeholder.interp(azimuth_time=new_azimuth_time, ground_range=new_ground_range, method='linear')
 
         # first perform median filter (performs better if anomalies are present),then mean filter to smooth edges
-        era5_smoothed = era5_subsamp.rolling(azimuth_time = smoothing_window, ground_range = smoothing_window, center = True, min_periods=2).median()
-        era5_smoothed = era5_smoothed.rolling(azimuth_time = smoothing_window, ground_range = smoothing_window, center = True, min_periods=2).mean()
+        era5_smoothed = era5_subsamp.rolling(azimuth_time = self.era5_smoothing_window, ground_range = self.era5_smoothing_window, center = True, min_periods=2).median()
+        era5_smoothed = era5_smoothed.rolling(azimuth_time = self.era5_smoothing_window, ground_range = self.era5_smoothing_window, center = True, min_periods=2).mean()
 
         # re-interpolate to the native resolution and add to object
         era5_interp = era5_smoothed.interp(azimuth_time=azimuth_time_placeholder, ground_range=ground_range_placeholder, method='linear')
@@ -475,8 +480,8 @@ class S1DopplerLeakage:
 
         Input
         -----
-        antenna_elements int; number of anetenna elements that are considered in beam tapering
-        antenna_weighting: float, int; weighting parameter as defined by the called beam pattern functions
+        antenna_elements int; number of anetenna elements that are considered in beam tapering, only affects when beam pattern = phased_array
+        antenna_weighting: float, int; weighting parameter as defined by the called beam pattern functions. only affects when beam pattern = phased_array
         """
         
         self.data['distance_slant_range'] = np.sqrt(self.data['distance_ground']**2 + self.z0**2)
