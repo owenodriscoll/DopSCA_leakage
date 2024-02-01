@@ -24,7 +24,9 @@ from typing import Callable, Union, List, Dict, Any
 
 # --------- TODO LIST ------------
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
-# FIXME unfortunate combinates of vx_sat, PRF and resolution_spatial can lead to artifacts, maybe interpolation?
+# FIXME unfortunate combinates of vx_sat, PRF and grid_spacing can lead to artifacts, maybe interpolation?
+# FIXME consider weighting beam backscatter weight
+
 
 # TODO add option to include geophysical Doppler
 # TODO add land mask filter
@@ -70,11 +72,11 @@ class S1DopplerLeakage:
     vx_sat: int; along-azimuthal velocity of satellite, in meters per second
     PRF: int; pulse repetition frequency
     az_mask_cutoff: int; along azimuth beam footprint to consider per pulse (outside is clipped off), in meters
-    resolution_spatial: int; pixel spacing in meters to which Sentinel-1 SAFE files are coarsened
-    scene_size: int; spatial resolution to which subscene results are averaged
+    grid_spacing: int; pixel spacing in meters to which Sentinel-1 SAFE files are coarsened
+    resolution_product: int; spatial resolution to which subscene results are averaged, e.g. if resolution_product = 25 km, moving average window is 12.5 km (pixel size permitting)
     era5_directory: str; directory containing era5 file. Will look for file containing "{yyyy}{mm}.nc" or "era5{yy}{mm}{dd}h{hh}00_lat{}_lon{}.nc" to load
     era5_file: str; specific file to load
-    era5_undersample_factor: int; factor by which to coarsen era5 resolution (after interpolating to resolution_spatial)
+    era5_undersample_factor: int; factor by which to coarsen era5 resolution (after interpolating to grid_spacing)
     era5_smoothing_window: int; window size for smoothing coarsened interpolated era5 data
     random_state: int; fixed random state seed for reproducibility of stochastic processes
     _denoise: bool; whether to denoise loaded Sentinel-1 .SAFE files (recommended)
@@ -92,14 +94,14 @@ class S1DopplerLeakage:
     antenna_height: float = 0.3
     antenna_elements: int = 10
     antenna_weighting: float = 0.5
-    beam_pattern: str = "sinc" 
+    beam_pattern: str = "sinc"
     incidence_angle_scat: float = 40
     incidence_angle_scat_boresight: float = 45
     vx_sat: int = 6800 
     PRF: int = 4
-    az_mask_cutoff: int = 80_000 # m # two sided
-    resolution_spatial: int = 340 # m # 
-    scene_size: int = 25_000
+    az_mask_cutoff: int = 80_000
+    grid_spacing: int = 340
+    resolution_product: int = 25_000
     era5_directory: str = "" 
     era5_file: Union[bool, str] = False 
     era5_undersample_factor: int = 10
@@ -113,9 +115,9 @@ class S1DopplerLeakage:
 
         self.Lambda = c / self.f0 # m
         self.stride = self.vx_sat / self.PRF
-        self.az_mask_pixels_cutoff = int(self.az_mask_cutoff/2//self.resolution_spatial) 
-        self.grg_N = int(self.scene_size // self.resolution_spatial)           # number of fast-time samples to average to scene size
-        self.slow_time_N = int(self.scene_size // self.stride)                 # number of slow-time samples to average to scene size
+        self.az_mask_pixels_cutoff = int(self.az_mask_cutoff/2//self.grid_spacing) 
+        self.grg_N = int(self.resolution_product // self.grid_spacing)           # number of fast-time samples to average to scene size
+        self.slow_time_N = int(self.resolution_product // self.stride)                 # number of slow-time samples to average to scene size
         attributes_to_store = copy.deepcopy(self.__dict__)
 
         # if input values are None or Booleans, convert them to string type
@@ -123,8 +125,8 @@ class S1DopplerLeakage:
         self.attributes_to_store = attributes_to_store_updated
 
         # warn if aliasing might occur due to combination of spatial and sampling resolutions 
-        if self.stride % self.resolution_spatial != 0:
-            warnings.warn("Combination of vx_sat, PRF and resolution_spatial may lead to aliasing: (vx_sat / PRF) % resolution_spatial != 0")
+        if self.stride % self.grid_spacing != 0:
+            warnings.warn("Combination of vx_sat, PRF and grid_spacing may lead to aliasing: (vx_sat / PRF) % grid_spacing != 0")
 
     @staticmethod
     def convert_to_0_360(longitude):
@@ -152,7 +154,7 @@ class S1DopplerLeakage:
         Open data from a file or a list of files. First check if file can be reloaded
         """
 
-        def create_storage_name(filename, resolution_spatial):
+        def create_storage_name(filename, grid_spacing):
             """
             Function to create a storage name for given Sentinel-1 .SAFE file(s)
             """
@@ -168,7 +170,7 @@ class S1DopplerLeakage:
                 
             id_end = ref_file.rfind('/') + 1
             storage_dir = ref_file[:id_end]
-            return storage_dir + unique_ids + f'_res{resolution_spatial}.nc' 
+            return storage_dir + unique_ids + f'_res{grid_spacing}.nc' 
 
 
         def find_unique_id(filename, unique_id_length = 4):
@@ -179,7 +181,7 @@ class S1DopplerLeakage:
             return filename[id_start:id_start+unique_id_length]
 
 
-        def open_new_file(filename, resolution_spatial, denoise):
+        def open_new_file(filename, grid_spacing, denoise):
             """
             Loads Sentinel-1 .SAFE file(s) and, if multiple, merges them 
             """
@@ -192,13 +194,13 @@ class S1DopplerLeakage:
             with warnings.catch_warnings(record=True) as caught_warnings:
                 self._successful_files = []
                 if isinstance(filename, str):
-                    S1_file = grd_to_nrcs(filename, prod_res=resolution_spatial, denoise=denoise)
+                    S1_file = grd_to_nrcs(filename, prod_res=grid_spacing, denoise=denoise)
                     self._successful_files.append(file)
                 elif isinstance(filename, list):
                     _file_contents = []
                     for i, file in enumerate(filename):
                         try:
-                            content_partial = grd_to_nrcs(file, prod_res=resolution_spatial, denoise=denoise)
+                            content_partial = grd_to_nrcs(file, prod_res=grid_spacing, denoise=denoise)
                             _file_contents.append(content_partial)
                             self._successful_files.append(file)
                         except Exception as e:
@@ -214,7 +216,7 @@ class S1DopplerLeakage:
             return S1_file
 
 
-        storage_name = create_storage_name(self.filename, self.resolution_spatial)
+        storage_name = create_storage_name(self.filename, self.grid_spacing)
 
         # reload file if possible
         if os.path.isfile(storage_name):
@@ -223,8 +225,8 @@ class S1DopplerLeakage:
 
         # else open .SAFE files, process and save as .nc
         else:
-            self.S1_file = open_new_file(self.filename, self.resolution_spatial, self._denoise)
-            storage_name = create_storage_name(self._successful_files, self.resolution_spatial)
+            self.S1_file = open_new_file(self.filename, self.grid_spacing, self._denoise)
+            storage_name = create_storage_name(self._successful_files, self.grid_spacing)
             self.S1_file.to_netcdf(storage_name)
             print(f"No pre-saved file found, instead saved loaded file as: {storage_name}")
         return
@@ -296,7 +298,7 @@ class S1DopplerLeakage:
         # ERA5 data is subsampled
         # this should not affect resolution much as, for example, the resolution of 1/4 deg ERA5 is approx 50km, 
         # The resampled grid size should still be ~50km (S1 resolution * era5_smoothing_window * era5_undersample_factor ~ 50km)
-        resolution_condition = self.resolution_spatial * self.era5_undersample_factor * (1 * self.era5_smoothing_window) # NOTE * 1 because only mean window operations considered
+        resolution_condition = self.grid_spacing * self.era5_undersample_factor * (1 * self.era5_smoothing_window) # NOTE * 1 because only mean window operations considered
 
         # check whether resampling is unacceptable
         # resolution is ideally twice the grid spacing and 1 degree is approximately 100km
@@ -354,8 +356,8 @@ class S1DopplerLeakage:
 
         # calculate new ground range and azimuth range belonging to observation with scatterometer viewing geometry
         grg_offset = np.tan(np.deg2rad(self.incidence_angle_scat)) * self.z0
-        grg = np.arange(self.S1_file[var_nrcs].data.shape[1]) * self.resolution_spatial + grg_offset
-        az = (np.arange(self.S1_file[var_nrcs].data.shape[0]) - self.S1_file[var_nrcs].data.shape[0]//2) * self.resolution_spatial
+        grg = np.arange(self.S1_file[var_nrcs].data.shape[1]) * self.grid_spacing + grg_offset
+        az = (np.arange(self.S1_file[var_nrcs].data.shape[0]) - self.S1_file[var_nrcs].data.shape[0]//2) * self.grid_spacing
         x_sat = np.arange(az.min(), az.max(), self.stride)
 
         # create new dataset 
@@ -369,7 +371,7 @@ class S1DopplerLeakage:
                 grg = (["grg"], grg, {'units': 'm'}),
             ),
             attrs=dict(
-                resolution_spatial = self.resolution_spatial),
+                grid_spacing = self.grid_spacing),
         )
 
         # add windfield
@@ -430,7 +432,7 @@ class S1DopplerLeakage:
         _data = []
         dim_filter = "az"
         dim_new = "az_idx"
-        dim_new_res = self.data.attrs['resolution_spatial']
+        dim_new_res = self.data.attrs['grid_spacing']
 
         # array with azimuth indexes to select over slow time
         idx_az = np.array([masks[i] for i in idx_slow_time])
@@ -529,6 +531,7 @@ class S1DopplerLeakage:
     def compute_leakage_velocity(self):
         """
         Computes leakage velocity considering the beam pattern, nrcs weighting and geometric Doppler
+        NOTE range-dependend gain compensation (weight_rg) returns overestimated signal at sidelobe nulls
         """
         # compute geometrical doppler, beam pattern and nrcs weigths
         self.data['dop_geom'] = (2 * self.vx_sat * np.sin(self.data['az_angle_wrt_boresight']) / self.Lambda) # eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cummin 
@@ -539,7 +542,7 @@ class S1DopplerLeakage:
         self.data['V_leakage'] = self.Lambda * self.data['dop_beam_weighted'] / (2 * np.sin(np.deg2rad(self.data['inc_scatt_eqv']))) # using the equivalent scatterometer incidence angle
 
         # calculate scatt equivalent nrcs
-        self.data['nrcs_scat'] = ((self.data['nrcs'] * self.data['beam']).sum(dim='az_idx', skipna=False) / self.data['beam'].sum(dim='az_idx'))
+        self.data['nrcs_scat'] = ((self.data['nrcs_scat_eqv'] * self.data['beam']).sum(dim='az_idx', skipna=False) / self.data['beam'].sum(dim='az_idx'))
 
         # sum over azimuth to receive range-slow_time results
         weight_rg = (self.data['beam'] * self.data['nrcs_weight']).sum(dim='az_idx', skipna=False)
