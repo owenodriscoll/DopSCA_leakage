@@ -25,7 +25,8 @@ from typing import Callable, Union, List, Dict, Any
 # --------- TODO LIST ------------
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and grid_spacing can lead to artifacts, maybe interpolation?
-# FIXME consider weighting beam backscatter weight
+# FIXME consider gain compensation in range (weighting beam backscatter weight)
+# FIXME replace s1sea with xsar for much faster importing and loading of files
 
 
 # TODO add option to include geophysical Doppler
@@ -57,30 +58,57 @@ c = 3E8
 @dataclass
 class S1DopplerLeakage:
     """
-    Input:
-    ------
-    filename: str, list; filename or list of filenames of Sentinel-1 .SAFE
-    f0: float; radiowave frequency in hz
-    z0: float; average satellite orbit height in meters
-    antenna_length: float;
-    antenna_height: float;
-    antenna_elements: int; number of elements in azimuth and range (currently must be equal) used for phased array tapering on receive
-    antenna_weighting: float; element weighting in azimuth and range (currently must be equal) used for phased array tapering on receive
-    beam_pattern: str; Determines the beam width and side-lobe sensitivity
-    incidence_angle_scat: float; incidence angle of scatterometer at first ground range (determines ground range distance)
-    incidence_angle_scat_boresight: float; boresight incidence angle of scatterometer 
-    vx_sat: int; along-azimuthal velocity of satellite, in meters per second
-    PRF: int; pulse repetition frequency
-    az_mask_cutoff: int; along azimuth beam footprint to consider per pulse (outside is clipped off), in meters
-    grid_spacing: int; pixel spacing in meters to which Sentinel-1 SAFE files are coarsened
-    resolution_product: int; spatial resolution to which subscene results are averaged, e.g. if resolution_product = 25 km, moving average window is 12.5 km (pixel size permitting)
-    era5_directory: str; directory containing era5 file. Will look for file containing "{yyyy}{mm}.nc" or "era5{yy}{mm}{dd}h{hh}00_lat{}_lon{}.nc" to load
-    era5_file: str; specific file to load
-    era5_undersample_factor: int; factor by which to coarsen era5 resolution (after interpolating to grid_spacing)
-    era5_smoothing_window: int; window size for smoothing coarsened interpolated era5 data
-    random_state: int; fixed random state seed for reproducibility of stochastic processes
-    _denoise: bool; whether to denoise loaded Sentinel-1 .SAFE files (recommended)
-    _speckle_noise: bool; whetehr to add artifical speckle to synthesized scatterometer product (recommended)
+    Parameters
+    ----------
+    filename: str, list
+        filename or list of filenames of Sentinel-1 .SAFE
+    f0: float
+        radiowave frequency in hz
+    z0: float
+        average satellite orbit height in meters
+    antenna_length: float
+
+    antenna_height: float
+
+    antenna_elements: int
+        number of elements in azimuth and range (currently must be equal) used for phased array tapering on receive
+    antenna_weighting: float
+        element weighting in azimuth and range (currently must be equal) used for phased array tapering on receive
+    beam_pattern: str
+        determines the beam width and side-lobe sensitivity
+    incidence_angle_scat: float
+        incidence angle of scatterometer at first ground range (determines ground range distance)
+    incidence_angle_scat_boresight: float
+        boresight incidence angle of scatterometer 
+    vx_sat: int
+        along-azimuthal velocity of satellite, in meters per second
+    PRF: int
+        pulse repetition frequency
+    az_mask_cutoff: int
+        along azimuth beam footprint to consider per pulse (outside is clipped off), in meters
+    grid_spacing: int
+        pixel spacing in meters to which Sentinel-1 SAFE files are coarsened
+    resolution_product: int
+        spatial resolution to which subscene results are averaged, e.g. if resolution_product = 25 km, moving average window is 12.5 km (pixel size permitting)
+    era5_directory: str
+        directory containing era5 file. Will look for file containing "{yyyy}{mm}.nc" or "era5{yy}{mm}{dd}h{hh}00_lat{}_lon{}.nc" to load
+    era5_file: str
+        specific file to load
+    era5_undersample_factor: int
+        factor by which to coarsen era5 resolution (after interpolating to grid_spacing)
+    era5_smoothing_window: int
+        window size for smoothing coarsened interpolated era5 data
+    random_state: int
+        fixed random state seed for reproducibility of stochastic processes
+    _denoise: bool
+        whether to denoise loaded Sentinel-1 .SAFE files (recommended)
+    _pulsepair_noise: bool
+        whether to add artifical noise from coherence loss due to pulse pair mechanism following Cramer Roa lower bound (recommended)
+    _speckle_noise: bool
+        whether to add artifical speckle to synthesized scatterometer product (recommended)
+
+    Antenna height and length retrieved from: "Fois, F., Hoogeboom, P., Le Chevalier, F., & Stoffelen, A. (2015, July). DOPSCAT: A mission concept for a Doppler wind-scatterometer. 
+        In 2015 IEEE International Geoscience and Remote Sensing Symposium (IGARSS) (pp. 2572-2575). IEEE."
 
     Output:
     -------
@@ -108,6 +136,7 @@ class S1DopplerLeakage:
     era5_smoothing_window: int = 15
     random_state: int = 42
     _denoise: bool = True
+    _pulsepair_noise: bool = True
     _speckle_noise: bool = True
 
 
@@ -133,6 +162,10 @@ class S1DopplerLeakage:
         return (longitude + 360) % 360
     
     @staticmethod
+    def decorrelation(tau, T):
+        return np.exp(-(tau/T)**2) # 
+    
+    @staticmethod
     def speckle_noise(noise_shape: tuple, random_state: int = 42):
         """
         Generates multiplicative speckle noise for intensity (i.e. squared) with mean value of 1
@@ -146,6 +179,45 @@ class S1DopplerLeakage:
         noise = (abs(noise)**2)/2
 
         return noise.reshape(noise_shape)
+
+    @staticmethod
+    def pulse_pair_sigma_v(T_pp, T_corr_surface, T_corr_Doppler, SNR, Lambda, N_L = 1):
+        """
+        Calculates the Pulse pair velocity standard deviation within a resolution cell due to coherence loss
+
+        NOTE assumes broadside geometry (non-squinted)
+
+        Parameters
+        ----------
+        T_pp : scaler
+            Intra pulse pair time separation
+        T_corr_surface : scaler
+            Decorrelation time of ocean surface at scales of radio wavelength of interest
+        T_corr_Doppler : scaler
+            Decorrelation time of velocities within resolution cell as a result of satellite motion during pulse-pair transmit
+        SNR : scaler
+            Signal to Noise ratio (for pulse-pair system we assume signal to clutter ratio of 1 dominates)
+        Lambda : scaler
+            Wavelength of considered radiowave
+        N_L : int
+            Number of independent looks for given area
+
+        Returns
+        -------
+        Scaler of estimates surface velocity standard deviation
+
+        """
+        wavenumber = 2 * np.pi / Lambda 
+
+        gamma_velocity = S1DopplerLeakage.decorrelation(T_pp, T_corr_Doppler) # eq 6 & 7 Rodriguez (2018), NOTE not valid for squint NOTE assumes Gaussian beam pattern
+        gamma_temporal = S1DopplerLeakage.decorrelation(T_pp, T_corr_surface)
+        gamma_SNR = 1 / (1 + SNR)
+
+        gamma = gamma_temporal * gamma_SNR * gamma_velocity
+        
+        variance = (1 / (2*wavenumber*T_pp))**2 / (2*N_L) * (1-gamma**2)/gamma**2 # eq 14 Rodriguez (2018)
+
+        return np.sqrt(variance), gamma
 
 
     # TODO add chunking
@@ -528,13 +600,20 @@ class S1DopplerLeakage:
 
         return
 
-    def compute_leakage_velocity(self):
+    def compute_leakage_velocity(self, add_pulse_pair_uncertainty = True):
         """
         Computes leakage velocity considering the beam pattern, nrcs weighting and geometric Doppler
         NOTE range-dependend gain compensation (weight_rg) returns overestimated signal at sidelobe nulls
+
+        Parameters
+        ----------
+        add_pulse_pair_uncertainty : Bool
+            ...
+        
+
         """
         # compute geometrical doppler, beam pattern and nrcs weigths
-        self.data['dop_geom'] = (2 * self.vx_sat * np.sin(self.data['az_angle_wrt_boresight']) / self.Lambda) # eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cummin 
+        self.data['dop_geom'] = (2 * self.vx_sat * np.sin(self.data['az_angle_wrt_boresight']) / self.Lambda) # eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming 
         self.data['nrcs_weight'] = (self.data['nrcs_scat_eqv'] / self.data['nrcs_scat_eqv'].mean(dim=['az_idx'])) # NOTE weight calculated per azimuth line
 
         # compute weighted received Doppler and resulting apparent LOS velocity
@@ -552,8 +631,38 @@ class S1DopplerLeakage:
         # add attribute
         self.data['V_leakage_pulse_rg'] = self.data['V_leakage_pulse_rg'].assign_attrs(units= 'm/s', description = 'Line of sight velocity ')
 
+        # add pulse pair velocity uncertainty
+        if (self._pulsepair_noise) & (add_pulse_pair_uncertainty):
+            wavenumber = 2 * np.pi / self.Lambda
+
+            # -- calculates average azimuthal beam standard deviation within -3 dB 
+            beam_db = 10*np.log10(self.data.beam)
+            beam_3dB = xr.where((beam_db- beam_db.max(dim = 'az_idx'))< -3, np.nan, 1)*self.data.az_angle_wrt_boresight
+            sigma_az_angle = beam_3dB.std(dim = 'az_idx').mean().values*1
+
+            T_corr_Doppler = 1/ (np.sqrt(2) * wavenumber * self.vx_sat * sigma_az_angle) # equation 7 from Rodriguez et al., (2018)
+            T_pp = 1.15E-4 # intra pulse-pair pulse separation time, Hoogeboom et al., (2018)
+            U = 6 # Average wind speed assumed of 7 m/s
+            T_corr_surface = 3.29 * self.Lambda / U # Decorrelation time of surface at radio frequency of interest (below eq. 19 Theodosious et al., 2023)
+            SNR = 1 # because SNR is dominated by signal to clutter, which for Pulse Pair is approx 1
+
+            self.velocity_error, self.gamma = self.pulse_pair_sigma_v(
+                T_pp = T_pp, 
+                T_corr_surface = T_corr_surface, 
+                T_corr_Doppler = T_corr_Doppler, 
+                SNR = SNR,  
+                Lambda = self.Lambda)
+
+            # fix random state
+            np.random.seed(self.random_state)
+            pulse_pair_noise = self.velocity_error * np.random.randn(*self.data.V_leakage_pulse_rg.shape)
+        else:
+            pulse_pair_noise = 0
+            
+        self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + pulse_pair_noise
+
         # low-pass filter scatterometer data to subscene resolution
-        data_4subscene = ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat']
+        data_4subscene= ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'V_sigma', 'nrcs_scat']
         data_subscene = [name + '_subscene' for name in data_4subscene]
         self.data[data_subscene] = self.data[data_4subscene].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
         return
@@ -562,7 +671,7 @@ class S1DopplerLeakage:
     def compute_leakage_velocity_estimate(self):
         """
         Method that estimates the leakage velocity using the scatterometer backscatter field. 
-        Can be done more efficeintly
+        Can be done more efficiently (multiple repeated calculations)
 
         Input
         -----
@@ -618,7 +727,7 @@ class S1DopplerLeakage:
 
     def apply(self, 
               data_to_return: list[str] = 
-                                ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 
+                                ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 'V_sigma', 'V_sigma_subscene',
                                  'doppler_pulse_rg_subscene', 'doppler_pulse_rg_subscene_inverted',
                                  'V_leakage_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene_inverted',
                                  'nrcs_scat_subscene', 'doppler_pulse_rg_inverted',
