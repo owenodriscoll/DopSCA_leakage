@@ -50,6 +50,9 @@ from typing import Callable, Union, List, Dict, Any
     # NOTE ERA5 data is resampled to Sentinel-1 grid size and then smoothed
     # NOTE calculation of az_mask_pixels_cutoff, grg_N, slow_time_N
 # NOTE currently number of antenna elements in azimuth and range are considered equal
+# NOTE Assumes no squint in:
+    # NOTE beam mask construction
+    # NOTE velocity variance calculation from coherence loss
 
 # constants
 c = 3E8
@@ -646,6 +649,7 @@ class S1DopplerLeakage:
             T_corr_surface = 3.29 * self.Lambda / U # Decorrelation time of surface at radio frequency of interest (below eq. 19 Theodosious et al., 2023)
             SNR = 1 # because SNR is dominated by signal to clutter, which for Pulse Pair is approx 1
 
+            # NOTE assumes no squint
             self.velocity_error, self.gamma = self.pulse_pair_sigma_v(
                 T_pp = T_pp, 
                 T_corr_surface = T_corr_surface, 
@@ -688,6 +692,10 @@ class S1DopplerLeakage:
         # add speckle noise assuming a single look
         if self._speckle_noise:
             noise_multiplier = self.speckle_noise(self.data.nrcs_scat.shape, random_state = self.random_state)
+
+            # NOTE assumed that backscatter could be obtained from mid beam from pulses prior to pulse pair and during pulse pair
+            # NOTE which would be equivalent to looks for nrcs, i.e. speckle decreased by np.sqrt(2)
+            noise_multiplier /= np.sqrt(2) 
         elif not self._speckle_noise:
             noise_multiplier = 1
 
