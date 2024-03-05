@@ -613,6 +613,7 @@ class S1DopplerLeakage:
         """
         Computes Line of Sight (LoS) leakage Doppler and velocity considering the beam pattern, nrcs weighting and geometric Doppler
         NOTE range-dependend gain compensation (weight_rg) returns overestimated signal at sidelobe nulls
+        NOTE assumes no squint
 
         Parameters
         ----------
@@ -630,20 +631,19 @@ class S1DopplerLeakage:
 
         # compute weighted received Doppler and resulting apparent LOS velocity
         self.data['dop_beam_weighted'] = self.data['dop_geom'] * self.data['beam'] * self.data['nrcs_weight']
-        # NOTE times np.sin(np.pi/2) (=1) because right-looking beam with no squint assumed (no azimuthal angle w.r.t. boresight) 
-        # NOTE LoS leakage
-        self.data['V_leakage'] = self.Lambda / 2 * self.data['dop_beam_weighted'] / ( np.sin(np.pi/2) * np.sin(self.data['elevation_angle'])) # using the equivalent scatterometer incidence angle
+        # geometrical Doppler is interpreted as LoS motion, because right-looking beam with no squint assumed (i.e. azimuthal angle w.r.t. boresight ignored and replaced wiht "1") 
+        self.data['V_leakage'] = self.Lambda / 2 * self.data['dop_beam_weighted'] / ( np.sin(self.data['elevation_angle'])) # using the equivalent scatterometer incidence angle
+
+        gain_compensation = (self.data['beam']).sum(dim='az_idx', skipna=False)
 
         # calculate scatt equivalent nrcs
-        self.data['nrcs_scat'] = ((self.data['nrcs_scat_eqv'] * self.data['beam']).sum(dim='az_idx', skipna=False) / self.data['beam'].sum(dim='az_idx'))
-
+        self.data['nrcs_scat'] = (self.data['nrcs_scat_eqv'] * self.data['beam']).sum(dim='az_idx', skipna=False) / gain_compensation
         # sum over azimuth to receive range-slow_time results
-        weight_rg = (self.data['beam'] * self.data['nrcs_weight']).sum(dim='az_idx', skipna=False)
-        receive_rg = self.data[['dop_beam_weighted', 'V_leakage']].sum(dim='az_idx', skipna=False)
-        self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = receive_rg / weight_rg
+        self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = (self.data[['dop_beam_weighted', 'V_leakage']]).sum(dim='az_idx', skipna=False) / gain_compensation
         
         # add attribute
         self.data['V_leakage_pulse_rg'] = self.data['V_leakage_pulse_rg'].assign_attrs(units= 'm/s', description = 'Line of Sight velocity ')
+        self.data['doppler_pulse_rg'] = self.data['doppler_pulse_rg'].assign_attrs(units= 'Hz', description = 'Line of Sight Doppler frequency ')
 
         # add pulse pair velocity uncertainty
         if (self._pulsepair_noise) & (add_pulse_pair_uncertainty):
