@@ -19,7 +19,9 @@ sys.path.insert(0, "../" )
 from misc import round_to_hour, angular_difference, calculate_distance, era5_wind_point, era5_wind_area
 
 from dataclasses import dataclass
+import types
 from typing import Callable, Union, List, Dict, Any
+
 
 
 # --------- TODO LIST ------------
@@ -87,7 +89,7 @@ class S1DopplerLeakage:
         along-azimuthal velocity of satellite, in meters per second
     PRF: int
         pulse repetition frequency
-    az_mask_cutoff: int
+    az_footprint_cutoff: int
         along azimuth beam footprint to consider per pulse (outside is clipped off), in meters
     grid_spacing: int
         pixel spacing in meters to which Sentinel-1 SAFE files are coarsened
@@ -130,13 +132,13 @@ class S1DopplerLeakage:
     elevation_angle_scat: float = 45
     vx_sat: int = 6800 
     PRF: int = 4
-    az_mask_cutoff: int = 80_000
+    az_footprint_cutoff: int = 80_000
     grid_spacing: int = 340
     resolution_product: int = 25_000
     era5_directory: str = "" 
     era5_file: Union[bool, str] = False 
     era5_undersample_factor: int = 10
-    era5_smoothing_window: int = 15
+    era5_smoothing_window: Union[types.NoneType, int] = None
     random_state: int = 42
     _denoise: bool = True
     _pulsepair_noise: bool = True
@@ -147,9 +149,13 @@ class S1DopplerLeakage:
 
         self.Lambda = c / self.f0 # m
         self.stride = self.vx_sat / self.PRF
-        self.az_mask_pixels_cutoff = int(self.az_mask_cutoff/2//self.grid_spacing) 
+        self.az_mask_pixels_cutoff = int(self.az_footprint_cutoff/2//self.grid_spacing) 
         self.grg_N = int(self.resolution_product // self.grid_spacing)           # number of fast-time samples to average to scene size
-        self.slow_time_N = int(self.resolution_product // self.stride)                 # number of slow-time samples to average to scene size
+        self.slow_time_N = int(self.resolution_product // self.stride)           # number of slow-time samples to average to scene size
+        if type(self.era5_smoothing_window) == types.NoneType:                   # set smoothing window of era5 based on grid size of loaded S1 data
+            self.era5_smoothing_window = int((200 / self.grid_spacing) * 15 )
+            
+        # Store attributes in object
         attributes_to_store = copy.deepcopy(self.__dict__)
 
         # if input values are None or Booleans, convert them to string type
@@ -590,9 +596,10 @@ class S1DopplerLeakage:
         if self.beam_pattern == "sinc":
             beam_az = beam_az_tx ** 2
         elif self.beam_pattern == "phased_array":
+            # beam_az_tx = phased_array(sin_angle=self.data.az_angle_wrt_boresight, L = self.antenna_length, f0 = self.f0, N = N, w = w).squeeze()
             beam_az_rx = phased_array(sin_angle=self.data.az_angle_wrt_boresight, L = self.antenna_length, f0 = self.f0, N = N, w = w).squeeze()
             beam_az = beam_az_tx * beam_az_rx
-
+        
         beam_grg_tx = sinc_bp(sin_angle=self.data.grg_angle_wrt_boresight, L = self.antenna_height, f0 = self.f0)
         beam_grg_rx = beam_grg_tx
         beam_grg = beam_grg_tx * beam_grg_rx
@@ -600,7 +607,6 @@ class S1DopplerLeakage:
         self.data['beam'] = ([*self.data.az_angle_wrt_boresight.sizes], beam)
 
         self.data = self.data.astype('float32')
-
         return
 
     def compute_leakage_velocity(self, add_pulse_pair_uncertainty = True):
