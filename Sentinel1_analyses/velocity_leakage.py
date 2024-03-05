@@ -81,8 +81,8 @@ class S1DopplerLeakage:
         determines the beam width and side-lobe sensitivity
     incidence_angle_scat: float
         incidence angle of scatterometer at first ground range (determines ground range distance)
-    incidence_angle_scat_boresight: float
-        boresight incidence angle of scatterometer 
+    elevation_angle_scat: float
+        elevation angle of scatterometer beam center
     vx_sat: int
         along-azimuthal velocity of satellite, in meters per second
     PRF: int
@@ -127,7 +127,7 @@ class S1DopplerLeakage:
     antenna_weighting: float = 0.5
     beam_pattern: str = "sinc"
     incidence_angle_scat: float = 40
-    incidence_angle_scat_boresight: float = 45
+    elevation_angle_scat: float = 45
     vx_sat: int = 6800 
     PRF: int = 4
     az_mask_cutoff: int = 80_000
@@ -578,7 +578,7 @@ class S1DopplerLeakage:
         
         self.data['distance_slant_range'] = np.sqrt(self.data['distance_ground']**2 + self.z0**2)
         self.data['az_angle_wrt_boresight'] = np.arcsin((self.data['distance_az'])/self.data['distance_slant_range']) # NOTE arcsin instead of tan as distance_slant_range includes azimuthal angle
-        self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.incidence_angle_scat_boresight)
+        self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.elevation_angle_scat)
         self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
 
         # NOTE the following computations are directly computed, a delayed lazy computation may be better
