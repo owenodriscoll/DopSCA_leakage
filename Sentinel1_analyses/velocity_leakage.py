@@ -2,6 +2,7 @@ import os
 import io
 import sys 
 import glob
+import xsar
 import dask
 import copy
 import pyproj
@@ -9,8 +10,7 @@ import warnings
 import numpy as np
 import xarray as xr
 import dask.array as da
-from s1sea.cmod5n import cmod5n_inverse, cmod5n_forward
-from s1sea.s1_preprocess import grd_to_nrcs
+from stereoid.oceans.GMF.cmod5n import cmod5n_inverse, cmod5n_forward
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 
 # FIXME fix this
@@ -28,7 +28,6 @@ from typing import Callable, Union, List, Dict, Any
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and grid_spacing can lead to artifacts, maybe interpolation?
 # FIXME consider gain compensation in range (weighting beam backscatter weight)
-# FIXME replace s1sea with xsar for much faster importing and loading of files
 
 
 # TODO add option to include geophysical Doppler
@@ -105,8 +104,6 @@ class S1DopplerLeakage:
         window size for smoothing coarsened interpolated era5 data
     random_state: int
         fixed random state seed for reproducibility of stochastic processes
-    _denoise: bool
-        whether to denoise loaded Sentinel-1 .SAFE files (recommended)
     _pulsepair_noise: bool
         whether to add artifical noise from coherence loss due to pulse pair mechanism following Cramer Roa lower bound (recommended)
     _speckle_noise: bool
@@ -140,7 +137,6 @@ class S1DopplerLeakage:
     era5_undersample_factor: int = 10
     era5_smoothing_window: Union[types.NoneType, int] = None
     random_state: int = 42
-    _denoise: bool = True
     _pulsepair_noise: bool = True
     _speckle_noise: bool = True
 
@@ -235,6 +231,11 @@ class S1DopplerLeakage:
         Open data from a file or a list of files. First check if file can be reloaded
         """
 
+        attrs_to_str = ['start_date', 'stop_date', 'footprint', 'multidataset']
+        vars_to_keep = ['ground_heading', 'time', 'incidence', 'latitude', 'longitude', 'sigma0']
+        coords_to_drop = "spatial_ref"
+        pol = "VV"
+
         def create_storage_name(filename, grid_spacing):
             """
             Function to create a storage name for given Sentinel-1 .SAFE file(s)
@@ -262,10 +263,14 @@ class S1DopplerLeakage:
             return filename[id_start:id_start+unique_id_length]
 
 
-        def open_new_file(filename, grid_spacing, denoise):
+        def open_new_file(filename, grid_spacing):
             """
-            Loads Sentinel-1 .SAFE file(s) and, if multiple, merges them 
+            Loads Sentinel-1 .SAFE file(s) and, if multiple, concatenate along azimuth (sorted by time)
             """
+
+            dim_concat = "line"
+            var_sortby = "time"
+
             # Surpress some warnings
             output_buffer = io.StringIO()
             stdout_save = sys.stdout
@@ -275,13 +280,13 @@ class S1DopplerLeakage:
             with warnings.catch_warnings(record=True) as caught_warnings:
                 self._successful_files = []
                 if isinstance(filename, str):
-                    S1_file = grd_to_nrcs(filename, prod_res=grid_spacing, denoise=denoise)
+                    S1_file = xsar.open_dataset(filename, resolution=grid_spacing)
                     self._successful_files.append(file)
                 elif isinstance(filename, list):
                     _file_contents = []
                     for i, file in enumerate(filename):
                         try:
-                            content_partial = grd_to_nrcs(file, prod_res=grid_spacing, denoise=denoise)
+                            content_partial = xsar.open_dataset(file, resolution=grid_spacing)
                             _file_contents.append(content_partial)
                             self._successful_files.append(file)
                         except Exception as e:
@@ -290,7 +295,13 @@ class S1DopplerLeakage:
                             print(f'File {i} did not load properly. \nConsider manually adding file content to _file_contents. File in question: {file} \n Error: {e}')
                             sys.stdout = output_buffer
 
-                    S1_file = xr.merge(_file_contents)
+                    # concatenate data ensuring that it is sorted by time. 
+                    data_concatened = xr.concat(_file_contents, dim_concat)
+                    data_sorted = data_concatened.sortby(var_sortby)
+
+                    # redifine coordinate labels of concatened dimension
+                    line_step = data_sorted.line.diff(dim=dim_concat).max()
+                    S1_file = data_sorted.assign_coords(line = line_step.data*np.arange(data_sorted[dim_concat].size))
 
             # Reset system output to saved version
             sys.stdout = stdout_save
@@ -306,9 +317,25 @@ class S1DopplerLeakage:
 
         # else open .SAFE files, process and save as .nc
         else:
-            self.S1_file = open_new_file(self.filename, self.grid_spacing, self._denoise)
+            self.S1_file = open_new_file(self.filename, self.grid_spacing)
             storage_name = create_storage_name(self._successful_files, self.grid_spacing)
-            self.S1_file.to_netcdf(storage_name)
+
+            # convert to attributes to ones storeable as .nc
+            for attr in attrs_to_str:
+                self.S1_file.attrs[attr] = str(self.S1_file.attrs[attr])
+
+            # drop coordinate with a lot of attributes
+            self.S1_file = self.S1_file.drop_vars(coords_to_drop)
+
+            # keep only VV polarisation
+            self.S1_file = self.S1_file.sel(pol = pol)
+
+            # store as .nc file ...
+            self.S1_file[vars_to_keep].to_netcdf(storage_name)
+
+            # ... and reload
+            self.S1_file = xr.open_dataset(storage_name)
+
             print(f"No pre-saved file found, instead saved loaded file as: {storage_name}")
         return
 
@@ -325,16 +352,22 @@ class S1DopplerLeakage:
         array must be the same shape as the backscatter array in the S1_file.
         """
 
-        date = self.S1_file.azimuth_time.min().values.astype('datetime64[m]').astype(object)
+        var_time = "time"
+        var_lon = "longitude"
+        var_lat = "latitude"
+        var_azi = "line"
+        var_grg = "sample"
+
+        date = self.S1_file[var_time].min().values.astype('datetime64[m]').astype(object)
         date_rounded = round_to_hour(date)
         yy, mm, dd, hh = date_rounded.year, date_rounded.month, date_rounded.day, date_rounded.hour
         time = f"{hh:02}00"
 
-        latitudes = self.S1_file.latitude
-        longitudes = self.S1_file.longitude
-        latmean, lonmean = latitudes.mean().data*1, longitudes.mean().data*1
-        latmin, latmax = latitudes.min().data*1, latitudes.max().data*1
-        lonmin, lonmax = longitudes.min().data*1, longitudes.max().data*1
+        latitudes = self.S1_file[var_lat]
+        longitudes = self.S1_file[var_lon]
+        latmean, lonmean = latitudes.mean().values*1, longitudes.mean().values*1
+        latmin, latmax = latitudes.min().values*1, latitudes.max().values*1
+        lonmin, lonmax = longitudes.min().values*1, longitudes.max().values*1
         lonmin, lonmax = [self.convert_to_0_360(i) for i in [lonmin, lonmax]] # NOTE correction for fact that ERA5 goes between 0 - 360
 
         if type(self.era5_file) == str:
@@ -372,8 +405,8 @@ class S1DopplerLeakage:
             method = 'nearest')
 
         era5_subset = era5_subset_time.sel(
-            longitude = self.convert_to_0_360(self.S1_file.longitude),
-            latitude = self.S1_file.latitude,
+            longitude = self.convert_to_0_360(self.S1_file[var_lon]),
+            latitude = self.S1_file[var_lat],
             method = 'nearest')
 
         # ERA5 data is subsampled
@@ -393,23 +426,23 @@ class S1DopplerLeakage:
             print(message(['under-smoothed', 'increasing']))
 
         # create a placeholder dataset to avoid having to subsample/oversample on datetime vectors
-        azimuth_time_placeholder = np.arange(era5_subset.sizes['azimuth_time'])
-        ground_range_placeholder = np.arange(era5_subset.sizes['ground_range'])
-        era5_placeholder = era5_subset.assign_coords(azimuth_time=azimuth_time_placeholder, ground_range=ground_range_placeholder)
+        azimuth_time_placeholder = np.arange(era5_subset.sizes[var_azi])
+        ground_range_placeholder = np.arange(era5_subset.sizes[var_grg])
+        era5_placeholder = era5_subset.assign_coords({var_azi:azimuth_time_placeholder, var_grg:ground_range_placeholder})
 
         # Subsample the dataset by interpolation
-        new_azimuth_time = np.arange(era5_subset.sizes['azimuth_time']/self.era5_undersample_factor) * self.era5_undersample_factor
-        new_ground_range = np.arange(era5_subset.sizes['ground_range']/self.era5_undersample_factor) * self.era5_undersample_factor
-        era5_subsamp = era5_placeholder.interp(azimuth_time=new_azimuth_time, ground_range=new_ground_range, method='linear')
+        new_azimuth_time = np.arange(era5_subset.sizes[var_azi]/self.era5_undersample_factor) * self.era5_undersample_factor
+        new_ground_range = np.arange(era5_subset.sizes[var_grg]/self.era5_undersample_factor) * self.era5_undersample_factor
+        era5_subsamp = era5_placeholder.interp({var_azi:new_azimuth_time, var_grg:new_ground_range}, method='linear')
 
         # first perform median filter (performs better if anomalies are present),then mean filter to smooth edges
-        era5_smoothed = era5_subsamp.rolling(azimuth_time = self.era5_smoothing_window, ground_range = self.era5_smoothing_window, center = True, min_periods=2).median()
-        era5_smoothed = era5_smoothed.rolling(azimuth_time = self.era5_smoothing_window, ground_range = self.era5_smoothing_window, center = True, min_periods=2).mean()
+        era5_smoothed = era5_subsamp.rolling({var_azi : self.era5_smoothing_window, var_grg : self.era5_smoothing_window}, center = True, min_periods=2).median()
+        era5_smoothed = era5_smoothed.rolling({var_azi : self.era5_smoothing_window, var_grg : self.era5_smoothing_window}, center = True, min_periods=2).mean()
 
         # re-interpolate to the native resolution and add to object
-        era5_interp = era5_smoothed.interp(azimuth_time=azimuth_time_placeholder, ground_range=ground_range_placeholder, method='linear')
-        self.era5 = era5_interp.assign_coords(azimuth_time=era5_subset.azimuth_time, ground_range=era5_subset.ground_range)
-        return
+        era5_interp = era5_smoothed.interp({var_azi : azimuth_time_placeholder, var_grg : ground_range_placeholder}, method='linear')
+        self.era5 = era5_interp.assign_coords({var_azi : era5_subset[var_azi], var_grg : era5_subset[var_grg]})
+        return 
 
 
     def wdir_from_era5(self):
@@ -417,11 +450,13 @@ class S1DopplerLeakage:
         Calculates the wind direction with respect to the sensor using the ground geometry and era5 wind vectors
         """
 
+        var_lon = "longitude"
+        var_lat = "latitude"
         wdir_era5 = np.rad2deg(np.arctan2(self.era5.u10, self.era5.v10))
 
         # compute ground footprint direction
         geodesic = pyproj.Geod(ellps='WGS84')
-        corner_coords = [self.S1_file.longitude[0, 0], self.S1_file.latitude[0, 0], self.S1_file.longitude[-1,0], self.S1_file.latitude[-1,0]]
+        corner_coords = [self.S1_file[var_lon][0, 0], self.S1_file[var_lat][0, 0], self.S1_file[var_lon][-1,0], self.S1_file[var_lat][-1,0]]
         ground_dir, _, _ = geodesic.inv(*corner_coords)
 
         # compute directional difference between satelite and era5 wind direction
@@ -429,7 +464,7 @@ class S1DopplerLeakage:
         return
 
 
-    def create_dataset(self, var_nrcs: str = "NRCS_VV", var_inc: str = "inc"):
+    def create_dataset(self, var_nrcs: str = "sigma0", var_inc: str = "incidence"):
         """
         Creates a new xarray dataset with the coordinates and dimensions of interest using the Sentinel-1 data. 
         Computes the windfield given the Sentinel-1 and ERA5 data
@@ -656,7 +691,7 @@ class S1DopplerLeakage:
 
             T_corr_Doppler = 1/ (np.sqrt(2) * wavenumber * self.vx_sat * sigma_az_angle) # equation 7 from Rodriguez et al., (2018)
             T_pp = 1.15E-4 # intra pulse-pair pulse separation time, Hoogeboom et al., (2018)
-            U = 6 # Average wind speed assumed of 7 m/s
+            U = 6 # Average wind speed assumed of 6 m/s
             T_corr_surface = 3.29 * self.Lambda / U # Decorrelation time of surface at radio frequency of interest (below eq. 19 Theodosious et al., 2023)
             SNR = 1 # because SNR is dominated by signal to clutter, which for Pulse Pair is approx 1
 
@@ -692,13 +727,16 @@ class S1DopplerLeakage:
         -----
         speckle_noise: bool; whether to apply multiplicative speckle noise to scatterometer estimated nrcs
         """
+        var_nrcs = "sigma0"
+        var_inc = "incidence"
+
         # find indexes of S1 scene that were cropped (outside full beam pattern)
         idx_start = self.idx_az[0][self.az_mask_pixels_cutoff]
         idx_end = self.idx_az[-1][self.az_mask_pixels_cutoff]
 
         # create placeholder S1 data (pre-cropped)
-        new_nrcs = np.nan * np.ones_like(self.S1_file.NRCS_VV)
-        new_inc = np.nan * np.ones_like(self.S1_file.NRCS_VV)
+        new_nrcs = np.nan * np.ones_like(self.S1_file[var_nrcs])
+        new_inc = np.nan * np.ones_like(self.S1_file[var_nrcs])
 
         # add speckle noise assuming a single look
         if self._speckle_noise:
@@ -725,8 +763,8 @@ class S1DopplerLeakage:
         self_copy = copy.deepcopy(self)
 
         # replace real S1 data with scatterometer data interpolated to S1
-        self_copy.S1_file['NRCS_VV'] = (['azimuth_time', 'ground_range'], new_nrcs)
-        self_copy.S1_file['inc'] = (['azimuth_time', 'ground_range'], new_inc)
+        self_copy.S1_file[var_nrcs] = (['azimuth_time', 'ground_range'], new_nrcs)
+        self_copy.S1_file[var_inc] = (['azimuth_time', 'ground_range'], new_inc)
 
         # define names of variables to consider and return
         data_to_return = ['doppler_pulse_rg', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg', 'V_leakage_pulse_rg_subscene', 'nrcs_scat', 'nrcs_scat_subscene']
