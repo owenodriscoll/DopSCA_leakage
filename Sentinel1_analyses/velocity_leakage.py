@@ -28,6 +28,7 @@ from typing import Callable, Union, List, Dict, Any
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and grid_spacing can lead to artifacts, maybe interpolation?
 # FIXME consider gain compensation in range (weighting beam backscatter weight)
+# FIXME improve low pass filtering (rolling average in x- and y-directions is too simple)
 
 
 # TODO add option to include geophysical Doppler
@@ -729,6 +730,8 @@ class S1DopplerLeakage:
         """
         var_nrcs = "sigma0"
         var_inc = "incidence"
+        var_azi = "line"
+        var_grg = "sample"
 
         # find indexes of S1 scene that were cropped (outside full beam pattern)
         idx_start = self.idx_az[0][self.az_mask_pixels_cutoff]
@@ -763,8 +766,8 @@ class S1DopplerLeakage:
         self_copy = copy.deepcopy(self)
 
         # replace real S1 data with scatterometer data interpolated to S1
-        self_copy.S1_file[var_nrcs] = (['azimuth_time', 'ground_range'], new_nrcs)
-        self_copy.S1_file[var_inc] = (['azimuth_time', 'ground_range'], new_inc)
+        self_copy.S1_file[var_nrcs] = ([var_azi, var_grg], new_nrcs)
+        self_copy.S1_file[var_inc] = ([var_azi, var_grg], new_inc)
 
         # define names of variables to consider and return
         data_to_return = ['doppler_pulse_rg', 'doppler_pulse_rg_subscene', 'V_leakage_pulse_rg', 'V_leakage_pulse_rg_subscene', 'nrcs_scat', 'nrcs_scat_subscene']
