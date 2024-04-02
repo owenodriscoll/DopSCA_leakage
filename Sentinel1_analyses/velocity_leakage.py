@@ -465,11 +465,22 @@ class S1DopplerLeakage:
         return
 
 
-    def create_dataset(self, var_nrcs: str = "sigma0", var_inc: str = "incidence"):
+    def create_dataset(self, var_nrcs: str = "sigma0", var_inc: str = "incidence", fill_na_max_gap: int = 1):
         """
         Creates a new xarray dataset with the coordinates and dimensions of interest using the Sentinel-1 data. 
         Computes the windfield given the Sentinel-1 and ERA5 data
+
+        Parameters
+        ----------
+        var_nrcs: str,
+            name for variable containing nrcs
+        var_inc: str,
+            name for variable containing incidence angle
+        fill_na_max_gap: int,
+            Number of continuous missing pixels to fill along azimuth
         """  
+        dim_az = "az"
+        dim_grg = "grg"
 
         # calculate new ground range and azimuth range belonging to observation with scatterometer viewing geometry
         grg_offset = np.tan(np.deg2rad(self.incidence_angle_scat)) * self.z0
@@ -480,25 +491,30 @@ class S1DopplerLeakage:
         # create new dataset 
         data = xr.Dataset(
             data_vars=dict(
-                nrcs = (["az", "grg"], self.S1_file[var_nrcs].data, {'units': 'm2/m2'}),
-                inc = (["az", "grg"], self.S1_file[var_inc].data, {'units': 'Degrees'}),
+                nrcs = ([dim_az, dim_grg], self.S1_file[var_nrcs].data, {'units': 'm2/m2'}),
+                inc = ([dim_az, dim_grg], self.S1_file[var_inc].data, {'units': 'Degrees'}),
             ),
             coords=dict(
-                az = (["az"], az, {'units': 'm'}),
-                grg = (["grg"], grg, {'units': 'm'}),
+                az = ([dim_az], az, {'units': 'm'}),
+                grg = ([dim_grg], grg, {'units': 'm'}),
             ),
             attrs=dict(
                 grid_spacing = self.grid_spacing),
         )
 
+        # fill nans using limit = 1, so only spurious nans (single pixels) are filled, not consistent missing data
+        interpolater = lambda x: x.interpolate_na(dim = dim_az, method= 'linear', limit= fill_na_max_gap)
+        data['nrcs'] = interpolater(data['nrcs'])
+        data['inc'] = interpolater(data['inc'])
+
         # add windfield
         if isinstance(self.wdir_wrt_sensor, xr.DataArray):
-            data['wdir_wrt_sensor'] = (["az", "grg"], self.wdir_wrt_sensor.data)
+            data['wdir_wrt_sensor'] = ([dim_az, dim_grg], self.wdir_wrt_sensor.data)
         elif isinstance(self.wdir_wrt_sensor, (float, int)):
-            data['wdir_wrt_sensor'] = (["az", "grg"], np.ones_like(data.nrcs) * self.wdir_wrt_sensor)
+            data['wdir_wrt_sensor'] = ([dim_az, dim_grg], np.ones_like(data.nrcs) * self.wdir_wrt_sensor)
         windfield = cmod5n_inverse(data["nrcs"].data, data['wdir_wrt_sensor'].data, data["inc"].data)
 
-        data['windfield'] = (["az", "grg"], windfield)
+        data['windfield'] = ([dim_az, dim_grg], windfield)
         data["windfield"] = data["windfield"].assign_attrs(units= 'm/s', description = 'CMOD5n Windfield for Sentinel-1 backscatter')
 
         # cmod returns real values even when input is nan, here these are removed
@@ -507,7 +523,7 @@ class S1DopplerLeakage:
         data = data.where(~condition)
 
         # add another dimension for later use
-        x_sat = da.arange(data.az.min(), data.az.max(), self.stride)
+        x_sat = da.arange(data[dim_az].min(), data[dim_az].max(), self.stride)
         slow_time = self.stride * da.arange(x_sat.shape[0])
         x_sat = xr.DataArray(x_sat, dims='slow_time', coords={'slow_time': slow_time})
         data = data.assign(x_sat=x_sat)
