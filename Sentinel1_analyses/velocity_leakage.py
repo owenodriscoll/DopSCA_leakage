@@ -7,6 +7,7 @@ import dask
 import copy
 import pyproj
 import warnings
+import bottleneck # implicitely loaded somewhere
 import numpy as np
 import xarray as xr
 import dask.array as da
@@ -28,7 +29,7 @@ from typing import Callable, Union, List, Dict, Any
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and grid_spacing can lead to artifacts, maybe interpolation?
 # FIXME consider gain compensation in range (weighting beam backscatter weight)
-# FIXME improve low pass filtering (rolling average in x- and y-directions is too simple)
+# FIXME add option to add variable speckle or different averaging scheme when grid spacing is too great for resolution
 
 
 # TODO add option to include geophysical Doppler
@@ -103,6 +104,11 @@ class S1DopplerLeakage:
         factor by which to coarsen era5 resolution (after interpolating to grid_spacing)
     era5_smoothing_window: int
         window size for smoothing coarsened interpolated era5 data
+    fill_nan_limit: int,
+            Number of continuous missing pixels to fill along azimuth in loaded Sentinel-1 file. Select:
+             - 0 for no filling, 
+             - 1 for filling spurious missing pixels
+             - None for no limit on filling (everything filled)
     random_state: int
         fixed random state seed for reproducibility of stochastic processes
     _pulsepair_noise: bool
@@ -137,6 +143,7 @@ class S1DopplerLeakage:
     era5_file: Union[bool, str] = False 
     era5_undersample_factor: int = 10
     era5_smoothing_window: Union[types.NoneType, int] = None
+    fill_nan_limit: Union[types.NoneType, int] = 1
     random_state: int = 42
     _pulsepair_noise: bool = True
     _speckle_noise: bool = True
@@ -465,7 +472,7 @@ class S1DopplerLeakage:
         return
 
 
-    def create_dataset(self, var_nrcs: str = "sigma0", var_inc: str = "incidence", fill_na_max_gap: int = 1):
+    def create_dataset(self, var_nrcs: str = "sigma0", var_inc: str = "incidence"):
         """
         Creates a new xarray dataset with the coordinates and dimensions of interest using the Sentinel-1 data. 
         Computes the windfield given the Sentinel-1 and ERA5 data
@@ -476,8 +483,6 @@ class S1DopplerLeakage:
             name for variable containing nrcs
         var_inc: str,
             name for variable containing incidence angle
-        fill_na_max_gap: int,
-            Number of continuous missing pixels to fill along azimuth
         """  
         dim_az = "az"
         dim_grg = "grg"
@@ -502,25 +507,28 @@ class S1DopplerLeakage:
                 grid_spacing = self.grid_spacing),
         )
 
-        # fill nans using limit = 1, so only spurious nans (single pixels) are filled, not consistent missing data
-        interpolater = lambda x: x.interpolate_na(dim = dim_az, method= 'linear', limit= fill_na_max_gap)
+        # find points with nan's or poor backscatter estimates
+        # condition_pre = data['nrcs'].isnull()
+        condition_to_fix = ((data['nrcs'].isnull()) | (data['nrcs'] <= 0))
+        data['nrcs'] = data['nrcs'].where(~condition_to_fix)
+
+        # fill nans using limit, limit = 1 fills only single missing pixels,limit = None fill all, limit = 0 filters nothing, not consistent missing data
+        interpolater = lambda x: x.interpolate_na(dim = dim_az, method= 'linear', limit= self.fill_nan_limit, fill_value= 'extrapolate')
         data['nrcs'] = interpolater(data['nrcs'])
-        data['inc'] = interpolater(data['inc'])
+        conditions_post = ((data['nrcs'].isnull()) |(data['nrcs'] <= 0))
 
         # add windfield
         if isinstance(self.wdir_wrt_sensor, xr.DataArray):
             data['wdir_wrt_sensor'] = ([dim_az, dim_grg], self.wdir_wrt_sensor.data)
         elif isinstance(self.wdir_wrt_sensor, (float, int)):
-            data['wdir_wrt_sensor'] = ([dim_az, dim_grg], np.ones_like(data.nrcs) * self.wdir_wrt_sensor)
+            data['wdir_wrt_sensor'] = ([dim_az, dim_grg], np.ones_like(data['nrcs']) * self.wdir_wrt_sensor)
         windfield = cmod5n_inverse(data["nrcs"].data, data['wdir_wrt_sensor'].data, data["inc"].data)
 
         data['windfield'] = ([dim_az, dim_grg], windfield)
         data["windfield"] = data["windfield"].assign_attrs(units= 'm/s', description = 'CMOD5n Windfield for Sentinel-1 backscatter')
 
-        # cmod returns real values even when input is nan, here these are removed
-        nrcs_db = 10*np.log10(data.nrcs)
-        condition = ((nrcs_db.isnull()) |(data.nrcs == 0))
-        data = data.where(~condition)
+        # Remove data that, even after filling, does not meet criteria
+        data = data.where(~(conditions_post))
 
         # add another dimension for later use
         x_sat = da.arange(data[dim_az].min(), data[dim_az].max(), self.stride)
