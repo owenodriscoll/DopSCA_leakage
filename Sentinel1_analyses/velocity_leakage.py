@@ -85,7 +85,7 @@ class S1DopplerLeakage:
     incidence_angle_scat: float
         incidence angle of scatterometer at first ground range (determines ground range distance)
     elevation_angle_scat: float
-        elevation angle of scatterometer beam center
+        center elevation angle of scatterometer beam center
     vx_sat: int
         along-azimuthal velocity of satellite, in meters per second
     PRF: int
@@ -116,8 +116,15 @@ class S1DopplerLeakage:
     _speckle_noise: bool
         whether to add artifical speckle to synthesized scatterometer product (recommended)
 
-    Antenna height and length retrieved from: "Fois, F., Hoogeboom, P., Le Chevalier, F., & Stoffelen, A. (2015, July). DOPSCAT: A mission concept for a Doppler wind-scatterometer. 
-        In 2015 IEEE International Geoscience and Remote Sensing Symposium (IGARSS) (pp. 2572-2575). IEEE."
+    Sources
+    -------
+        "Fois, F., Hoogeboom, P., Le Chevalier, F., & Stoffelen, A. (2015, July). DOPSCAT: A mission concept for a Doppler wind-scatterometer. 
+            In 2015 IEEE International Geoscience and Remote Sensing Symposium (IGARSS) (pp. 2572-2575). IEEE."
+        "Hoogeboom, P., Stoffelen, A., & Lopez-Dekker, P. (2018, October). DopSCA, Scatterometer-based Simultaneous Ocean Vector Current and 
+            Wind Estimation. In 2018 Doppler Oceanography from Space (DOfS) (pp. 1-9). IEEE."
+        "Rostan, F., Ulrich, D., Riegger, S., & Østergaard, A. (2016, July). MetoP-SG SCA wind scatterometer design and performance. In 2016 
+            IEEE International Geoscience and Remote Sensing Symposium (IGARSS) (pp. 7366-7369). IEEE."
+
 
     Output:
     -------
@@ -125,20 +132,20 @@ class S1DopplerLeakage:
     """
 
     filename: Union[str, list] 
-    f0: float = 5.3E9
-    z0: float = 700E3
-    antenna_length: float = 3.2
-    antenna_height: float = 0.3
-    antenna_elements: int = 10
-    antenna_weighting: float = 0.5
-    beam_pattern: str = "sinc"
-    incidence_angle_scat: float = 40
-    elevation_angle_scat: float = 45
-    vx_sat: int = 6800 
-    PRF: int = 4
-    az_footprint_cutoff: int = 80_000
-    grid_spacing: int = 340
-    resolution_product: int = 25_000
+    f0: float = 5.4E9                                                   # Hoogeboom et al,. (2018)
+    z0: float = 824E3                                                   # 823-848 km e.g. in Fois et al,. (2015)
+    antenna_length: float = 3.2                                         # for mid beam, Fois et al,. (2015)
+    antenna_height: float = 0.3                                         # for mid beam, Fois et al,. (2015)
+    antenna_elements: int = 4                                           # for mid beam, Rostan et al,. (2016)
+    antenna_weighting: float = 0.5                                      # ?
+    beam_pattern: str = "sinc"                                          # ?, presumed tapered
+    incidence_angle_scat: float = 40                                    # custom, valid range of incidence angles is 20-65 degrees, Hoogeboom et al,. (2018) (is this for fore/aft beam or mid?)
+    elevation_angle_scat: float = 45                                    # ?
+    vx_sat: int = 6800                                                  # Hoogeboom et al,. (2018)
+    PRF: int = 4                                                        # PRF per antenna, total PRF is 32 Hz for 6 antennas, Hoogeboom et al,. (2018)
+    az_footprint_cutoff: int = 80_000                                   # custom
+    grid_spacing: int = 75                                              # assuming 150 m ground range resolution, Hoogeboom et al,. (2018)
+    resolution_product: int = 25_000                                    # Hoogeboom et al,. (2018)
     era5_directory: str = "" 
     era5_file: Union[bool, str] = False 
     era5_undersample_factor: int = 10
