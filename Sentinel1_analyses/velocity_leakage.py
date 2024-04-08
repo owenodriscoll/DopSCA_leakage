@@ -29,7 +29,7 @@ from typing import Callable, Union, List, Dict, Any
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and grid_spacing can lead to artifacts, maybe interpolation?
 # FIXME consider gain compensation in range (weighting beam backscatter weight)
-# FIXME add option to add variable speckle or different averaging scheme when grid spacing is too great for resolution
+
 
 
 # TODO add option to include geophysical Doppler
@@ -46,7 +46,6 @@ from typing import Callable, Union, List, Dict, Any
     # NOTE perfect right-looking radar with no pitch, yaw and roll
     # NOTE range cell migration already corrected for
     # NOTE neglecting any Earth-rotation effects. 
-# NOTE Loading .SAFE often does not work. If not, try using dual pol data only (still no guarantee)
 # NOTE Weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
 # NOTE Nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
 # NOTE Assumes square Sentinel-1 pixels. The following processes rely on square pixels
@@ -81,10 +80,10 @@ class S1DopplerLeakage:
     antenna_weighting: float
         element weighting in azimuth and range (currently must be equal) used for phased array tapering on receive
     beam_pattern: str
-        determines the beam width and side-lobe sensitivity
-    incidence_angle_scat: float
+        "sinc" or "phased_array". Determines the beam width and side-lobe sensitivity
+    swath_start_incidence_angle_scat: float
         incidence angle of scatterometer at first ground range (determines ground range distance)
-    elevation_angle_scat: float
+    boresight_elevation_angle_scat: float
         center elevation angle of scatterometer beam center
     vx_sat: int
         along-azimuthal velocity of satellite, in meters per second
@@ -106,9 +105,9 @@ class S1DopplerLeakage:
         window size for smoothing coarsened interpolated era5 data
     fill_nan_limit: int,
             Number of continuous missing pixels to fill along azimuth in loaded Sentinel-1 file. Select:
-             - 0 for no filling, 
-             - 1 for filling spurious missing pixels
-             - None for no limit on filling (everything filled)
+                - 0 for no filling, 
+                - 1 for filling spurious missing pixels
+                - None for no limit on filling (everything filled)
     random_state: int
         fixed random state seed for reproducibility of stochastic processes
     _pulsepair_noise: bool
@@ -139,8 +138,8 @@ class S1DopplerLeakage:
     antenna_elements: int = 4                                           # for mid beam, Rostan et al,. (2016)
     antenna_weighting: float = 0.5                                      # ?
     beam_pattern: str = "sinc"                                          # ?, presumed tapered
-    incidence_angle_scat: float = 40                                    # custom, valid range of incidence angles is 20-65 degrees, Hoogeboom et al,. (2018) (is this for fore/aft beam or mid?)
-    elevation_angle_scat: float = 45                                    # ?
+    swath_start_incidence_angle_scat: float = 30                        # custom, valid range of incidence angles is 20-65 degrees, Hoogeboom et al,. (2018) (is this for fore/aft beam or mid?)
+    boresight_elevation_angle_scat: float = 40                          # ?
     vx_sat: int = 6800                                                  # Hoogeboom et al,. (2018)
     PRF: int = 4                                                        # PRF per antenna, total PRF is 32 Hz for 6 antennas, Hoogeboom et al,. (2018)
     az_footprint_cutoff: int = 80_000                                   # custom
@@ -495,7 +494,7 @@ class S1DopplerLeakage:
         dim_grg = "grg"
 
         # calculate new ground range and azimuth range belonging to observation with scatterometer viewing geometry
-        grg_offset = np.tan(np.deg2rad(self.incidence_angle_scat)) * self.z0
+        grg_offset = np.tan(np.deg2rad(self.swath_start_incidence_angle_scat)) * self.z0
         grg = np.arange(self.S1_file[var_nrcs].data.shape[1]) * self.grid_spacing + grg_offset
         az = (np.arange(self.S1_file[var_nrcs].data.shape[0]) - self.S1_file[var_nrcs].data.shape[0]//2) * self.grid_spacing
         x_sat = np.arange(az.min(), az.max(), self.stride)
@@ -651,7 +650,7 @@ class S1DopplerLeakage:
         
         self.data['distance_slant_range'] = np.sqrt(self.data['distance_ground']**2 + self.z0**2)
         self.data['az_angle_wrt_boresight'] = np.arcsin((self.data['distance_az'])/self.data['distance_slant_range']) # NOTE arcsin instead of tan as distance_slant_range includes azimuthal angle
-        self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.elevation_angle_scat)
+        self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.boresight_elevation_angle_scat)
         self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
 
         # NOTE the following computations are directly computed, a delayed lazy computation may be better
@@ -681,20 +680,19 @@ class S1DopplerLeakage:
         Computes Line of Sight (LoS) leakage Doppler and velocity considering the beam pattern, nrcs weighting and geometric Doppler
         NOTE range-dependend gain compensation (weight_rg) returns overestimated signal at sidelobe nulls
         NOTE assumes no squint
+        NOTE computes LoS Dopplers
+        NOTE backscatter weight calculated per range line
 
         Parameters
         ----------
         add_pulse_pair_uncertainty : Bool
             whether to add pulse-pair uncertainty following Hoogeboom et al., (2018)
-        
-
         """
+
         # compute geometrical doppler, beam pattern and nrcs weigths
-        # NOTE Since rectilienar geometry with flat Earth elevation_angle == incidence angle
         self.data['elevation_angle'] = np.radians(self.data['inc_scatt_eqv'])
-        # NOTE LOS geometric Doppler
         self.data['dop_geom'] = 2 / self.Lambda * self.vx_sat * np.sin(self.data['az_angle_wrt_boresight']) * np.sin(self.data['elevation_angle']) # eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming 
-        self.data['nrcs_weight'] = (self.data['nrcs_scat_eqv'] / self.data['nrcs_scat_eqv'].mean(dim=['az_idx'])) # NOTE weight calculated per azimuth line
+        self.data['nrcs_weight'] = (self.data['nrcs_scat_eqv'] / self.data['nrcs_scat_eqv'].mean(dim=['az_idx'])) 
 
         # compute weighted received Doppler and resulting apparent LOS velocity
         self.data['dop_beam_weighted'] = self.data['dop_geom'] * self.data['beam'] * self.data['nrcs_weight']
@@ -807,9 +805,9 @@ class S1DopplerLeakage:
         # repeat the  previous chain of computations NOTE this could be done more efficiently
         self_copy.create_dataset()
         self_copy.create_beam_mask()
-        self_copy.compute_scatt_eqv_backscatter()
+        self_copy.compute_scatt_eqv_backscatter() 
         self_copy.compute_beam_pattern()
-        self_copy.compute_leakage_velocity()
+        self_copy.compute_leakage_velocity() 
 
         # add estimated leakage velocity back to original object
         self.data[data_to_return_new_names] = self_copy.data[data_to_return]
