@@ -24,12 +24,10 @@ import types
 from typing import Callable, Union, List, Dict, Any
 
 
-
 # --------- TODO LIST ------------
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and grid_spacing can lead to artifacts, maybe interpolation?
 # FIXME consider gain compensation in range (weighting beam backscatter weight)
-
 
 
 # TODO add option to include geophysical Doppler
@@ -46,6 +44,7 @@ from typing import Callable, Union, List, Dict, Any
     # NOTE perfect right-looking radar with no pitch, yaw and roll
     # NOTE range cell migration already corrected for
     # NOTE neglecting any Earth-rotation effects. 
+    # NOTE same pattern on transmit and receive
 # NOTE Weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
 # NOTE Nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
 # NOTE Assumes square Sentinel-1 pixels. The following processes rely on square pixels
@@ -55,6 +54,7 @@ from typing import Callable, Union, List, Dict, Any
 # NOTE Assumes no squint in:
     # NOTE beam mask construction
     # NOTE velocity variance calculation from coherence loss
+
 
 # constants
 c = 3E8
@@ -657,14 +657,15 @@ class S1DopplerLeakage:
         # NOTE Currently assumes same antenna elements and weighting in range as in azimuth 
         N = self.antenna_elements 
         w = self.antenna_weighting 
-        beam_az_tx = sinc_bp(sin_angle=self.data.az_angle_wrt_boresight, L = self.antenna_length, f0 = self.f0)
-
+        
+        # Assumes same patter on transmit and receive
         if self.beam_pattern == "sinc":
+            beam_az_tx = sinc_bp(sin_angle=self.data.az_angle_wrt_boresight, L = self.antenna_length, f0 = self.f0)
             beam_az = beam_az_tx ** 2
         elif self.beam_pattern == "phased_array":
             # beam_az_tx = phased_array(sin_angle=self.data.az_angle_wrt_boresight, L = self.antenna_length, f0 = self.f0, N = N, w = w).squeeze()
             beam_az_rx = phased_array(sin_angle=self.data.az_angle_wrt_boresight, L = self.antenna_length, f0 = self.f0, N = N, w = w).squeeze()
-            beam_az = beam_az_tx * beam_az_rx
+            beam_az = beam_az_rx**2 # * beam_az_tx
         
         beam_grg_tx = sinc_bp(sin_angle=self.data.grg_angle_wrt_boresight, L = self.antenna_height, f0 = self.f0)
         beam_grg_rx = beam_grg_tx
