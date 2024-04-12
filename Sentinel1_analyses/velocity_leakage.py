@@ -230,7 +230,7 @@ class S1DopplerLeakage:
 
         gamma_velocity = S1DopplerLeakage.decorrelation(T_pp, T_corr_Doppler) # eq 6 & 7 Rodriguez (2018), NOTE not valid for squint NOTE assumes Gaussian beam pattern
         gamma_temporal = S1DopplerLeakage.decorrelation(T_pp, T_corr_surface)
-        gamma_SNR = 1 / (1 + SNR)
+        gamma_SNR = SNR / (1 + SNR)
 
         gamma = gamma_temporal * gamma_SNR * gamma_velocity
         
@@ -734,13 +734,29 @@ class S1DopplerLeakage:
                 SNR = SNR,  
                 Lambda = self.Lambda)
 
-            # fix random state
-            np.random.seed(self.random_state)
-            pulse_pair_noise = self.velocity_error * np.random.randn(*self.data.V_leakage_pulse_rg.shape)
         else:
-            pulse_pair_noise = 0
+            self.velocity_error = 0
             
+        # compute approximate ground range spatial resolution of scatterometer (slant range resolution =/= ground range resolution)
+        grg_for_safekeeping = self.data.grg
+        total = self.data.grg.min()
+        new_grg_pixel = []
+        while total < self.data.grg.max():
+            new_grg_pixel.append(total.data*1)
+            new_incidence = np.arctan(total / self.z0)
+            total += (self.grid_spacing  /np.cos(np.pi/2 - new_incidence))
+
+        self.new_grg_pixel = new_grg_pixel
+        # # interpolate data to new grg range pixels (effectively a variable low pass filter)
+        self.data = self.data.interp(grg=self.new_grg_pixel, method="linear")
+
+        # fix random state to reproduce pulse pair noise, should be the same for inversion
+        np.random.seed(self.random_state)
+        pulse_pair_noise = self.velocity_error * np.random.randn(*self.data.V_leakage_pulse_rg.shape)
         self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + pulse_pair_noise
+
+        # # re-interpolate to higher sampling to maintain uniform ground samples
+        self.data = self.data.interp(grg=grg_for_safekeeping, method="linear")
 
         # low-pass filter scatterometer data to subscene resolution
         data_4subscene= ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'V_sigma', 'nrcs_scat']
@@ -771,17 +787,23 @@ class S1DopplerLeakage:
         new_nrcs = np.nan * np.ones_like(self.S1_file[var_nrcs])
         new_inc = np.nan * np.ones_like(self.S1_file[var_nrcs])
 
+        # interpolate data to new grg range pixels (effectively a variable low pass filter along range)
+        nrcs_scat_grg_interpolated = self.data.nrcs_scat.interp(grg=self.new_grg_pixel, method="linear")
+
         # add speckle noise assuming a single look
         if self._speckle_noise:
-            noise_multiplier = self.speckle_noise(self.data.nrcs_scat.shape, random_state = self.random_state)
+            noise_multiplier = self.speckle_noise(nrcs_scat_grg_interpolated.shape, random_state = self.random_state)
 
             # NOTE assumed that backscatter could be obtained from mid beam from pulses prior to pulse pair and during pulse pair
-            # NOTE which would be equivalent to looks for nrcs, i.e. speckle decreased by np.sqrt(2)
+            # NOTE which would be equivalent to two looks for nrcs, i.e. speckle decreased by np.sqrt(2)
             noise_multiplier /= np.sqrt(2) 
         elif not self._speckle_noise:
             noise_multiplier = 1
 
-        single_look_nrcs = noise_multiplier * self.data.nrcs_scat
+        single_look_nrcs = noise_multiplier * nrcs_scat_grg_interpolated
+
+        # re-interpolate to higher sampling to maintain uniform ground samples
+        single_look_nrcs = single_look_nrcs.interp(grg=self.data.grg, method="linear")
 
         # interpolate estimated scatterometer data back to S1 grid size
         slow_time_upsamp = np.linspace(self.data.slow_time[0], self.data.slow_time[-1], idx_end - idx_start) 
