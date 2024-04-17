@@ -2,11 +2,11 @@ import os
 import io
 import sys 
 import glob
+import warnings
 import xsar
 import dask
 import copy
 import pyproj
-import warnings
 import bottleneck # implicitely loaded somewhere
 import numpy as np
 import xarray as xr
@@ -179,11 +179,11 @@ class S1DopplerLeakage:
     @staticmethod
     def convert_to_0_360(longitude):
         return (longitude + 360) % 360
-    
+
     @staticmethod
     def decorrelation(tau, T):
         return np.exp(-(tau/T)**2) # 
-    
+
     @staticmethod
     def speckle_noise(noise_shape: tuple, random_state: int = 42):
         """
@@ -295,7 +295,7 @@ class S1DopplerLeakage:
                 self._successful_files = []
                 if isinstance(filename, str):
                     S1_file = xsar.open_dataset(filename, resolution=grid_spacing)
-                    self._successful_files.append(file)
+                    self._successful_files.append(filename)
                 elif isinstance(filename, list):
                     _file_contents = []
                     for i, file in enumerate(filename):
@@ -739,12 +739,13 @@ class S1DopplerLeakage:
             
         # compute approximate ground range spatial resolution of scatterometer (slant range resolution =/= ground range resolution)
         grg_for_safekeeping = self.data.grg
-        total = self.data.grg.min()
+        total = self.data.grg.max()
         new_grg_pixel = []
-        while total < self.data.grg.max():
+        while total > self.data.grg.min():
             new_grg_pixel.append(total.data*1)
             new_incidence = np.arctan(total / self.z0)
-            total += (self.grid_spacing  /np.cos(np.pi/2 - new_incidence))
+            # total += (self.grid_spacing  /np.cos(np.pi/2 - new_incidence))
+            total -= (self.grid_spacing / np.sin(new_incidence))
 
         self.new_grg_pixel = new_grg_pixel
         # # interpolate data to new grg range pixels (effectively a variable low pass filter)
