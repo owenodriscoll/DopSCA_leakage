@@ -16,13 +16,12 @@ from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 
 # FIXME fix this
 # importing from one directory  up
-sys.path.insert(0, "../" )
+# sys.path.insert(0, "../" )
 from misc import round_to_hour, angular_difference, calculate_distance, era5_wind_point, era5_wind_area
 
 from dataclasses import dataclass
 import types
 from typing import Callable, Union, List, Dict, Any
-
 
 # --------- TODO LIST ------------
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
