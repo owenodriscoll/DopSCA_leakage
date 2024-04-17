@@ -1,0 +1,38 @@
+[project]
+name = "dopsca"
+dynamic = ["version"]
+authors = [
+  { name="Owen O'D"},
+]
+description = "Python package for automated hyperparameter-optimization of common machine-learning algorithms"
+readme = "README.md"
+requires-python = ">=3.11.0" #,<=3.12
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+]
+
+
+dependencies = [
+  "xsar",
+  "dask",
+  "xarray",
+  "drama",
+  "stereoid",
+  "xrft",
+  "numpy",
+  "pandas",
+  "scipy",
+  "matplotlib",
+  "pyproj",
+  "bottleneck",
+  "cmcrameri",
+  "ipykernel",
+  "joblib",
+  "cdsapi"
+]
+
+
+[project.urls]
+Homepage = "https://github.com/owenodriscoll/DopSCA"
