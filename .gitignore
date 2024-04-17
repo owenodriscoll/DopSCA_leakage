@@ -5,5 +5,6 @@ DopSCA.code-workspace
 ML_analyses
 *scatt4ML.nc
 *catboost_info
-era5_winds*
+*.nc
 data_processed
+*.egg-info

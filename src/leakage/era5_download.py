@@ -1,6 +1,5 @@
 import sys
-sys.path.insert(0, "../" )
-from misc import era5_wind_monthly
+from .misc import era5_wind_monthly
 
 """
 run file using command line as 

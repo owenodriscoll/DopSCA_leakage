@@ -14,10 +14,7 @@ import dask.array as da
 from stereoid.oceans.GMF.cmod5n import cmod5n_inverse, cmod5n_forward
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 
-# FIXME fix this
-# importing from one directory  up
-# sys.path.insert(0, "../" )
-from misc import round_to_hour, angular_difference, calculate_distance, era5_wind_point, era5_wind_area
+from .misc import round_to_hour, angular_difference, calculate_distance, era5_wind_point, era5_wind_area
 
 from dataclasses import dataclass
 import types
@@ -31,7 +28,6 @@ from typing import Callable, Union, List, Dict, Any
 
 # TODO add option to include geophysical Doppler
 # TODO add land mask filter
-# TODO ugly import from directory up
 # TODO add dask chunking
 # TODO add docstrings
     # TODO add kwargs to input for phased beam pattern in create_beampattern

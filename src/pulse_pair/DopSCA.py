@@ -6,8 +6,8 @@ import numpy as np
 from drama.performance.sar import sinc_bp
 from tqdm import tqdm
 
-from beam_pattern import azimuth_beamwidth, beam_pattern_oneway
-from surface_doppler import Doppler_inc
+from .beam_pattern import azimuth_beamwidth, beam_pattern_oneway
+from .surface_doppler import Doppler_inc
 
 # TODO check introduction of errors into sigma0 and doppler from radar model
 # --> stereoid.stereoid.oceans.radar_model.py RadarModel.add_errors
