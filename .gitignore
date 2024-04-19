@@ -9,3 +9,4 @@ ML_analyses
 data_processed
 *.egg-info
 .vscode
+.netrc
