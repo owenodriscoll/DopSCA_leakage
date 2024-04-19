@@ -24,6 +24,7 @@ from typing import Callable, Union, List, Dict, Any
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and grid_spacing can lead to artifacts, maybe interpolation?
 # FIXME consider gain compensation in range (weighting beam backscatter weight)
+# FIXME maybe not use lienar for inetrpolation from slant range to ground range?
 
 
 # TODO add option to include geophysical Doppler
@@ -39,7 +40,8 @@ from typing import Callable, Union, List, Dict, Any
     # NOTE perfect right-looking radar with no pitch, yaw and roll
     # NOTE range cell migration already corrected for
     # NOTE neglecting any Earth-rotation effects. 
-    # NOTE same pattern on transmit and receive
+    # NOTE same beam pattern on transmit and receive
+    # NOTE two nrcs observations per estiamte such that speckle is reduced by sqrt(2)
 # NOTE Weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
 # NOTE Nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
 # NOTE Assumes square Sentinel-1 pixels. The following processes rely on square pixels
@@ -739,17 +741,37 @@ class S1DopplerLeakage:
         while total > self.data.grg.min():
             new_grg_pixel.append(total.data*1)
             new_incidence = np.arctan(total / self.z0)
-            # total += (self.grid_spacing  /np.cos(np.pi/2 - new_incidence))
             total -= (self.grid_spacing / np.sin(new_incidence))
 
+        new_grg_pixel.reverse()
         self.new_grg_pixel = new_grg_pixel
-        # # interpolate data to new grg range pixels (effectively a variable low pass filter)
+        # interpolate data to new grg range pixels (effectively a variable low pass filter)
         self.data = self.data.interp(grg=self.new_grg_pixel, method="linear")
 
+        # coarsen the new ground range by factor two
+        grg_coarse = self.data.grg.coarsen(grg = 2,boundary='pad').mean()
+        
         # fix random state to reproduce pulse pair noise, should be the same for inversion
         np.random.seed(self.random_state)
-        pulse_pair_noise = self.velocity_error * np.random.randn(*self.data.V_leakage_pulse_rg.shape)
-        self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + pulse_pair_noise
+
+        # calculate pulse pair uncertainty for coarsend resolution
+        shape_pp = (grg_coarse.sizes['grg'], self.data.sizes['slow_time'])
+        V_pp = self.velocity_error*np.random.randn(*shape_pp)
+
+        # convert to xarray and add to data, interpolate using nearest for pulse pair 
+        V_pp = xr.DataArray(V_pp, dims = ['grg', 'slow_time'], coords= [grg_coarse, self.data['slow_time']])
+        self.data['V_pp'] = V_pp.interp(grg=self.data['grg'], method="nearest")
+
+        # V_leakage_pulse_rg_at_pp = self.data['V_leakage_pulse_rg'].interp(grg=grg_coarse, method="linear")
+        # V_leakage_pulse_rg_at_pp_w_pp = V_leakage_pulse_rg_at_pp/V_leakage_pulse_rg_at_pp*self.velocity_error*np.random.randn(*V_leakage_pulse_rg_at_pp.shape)
+        # self.data['V_sigma'] = V_leakage_pulse_rg_at_pp_w_pp.interp(grg=self.data['grg'], method="nearest")
+        # 
+        # np.random.seed(self.random_state)
+        # pulse_pair_noise = self.velocity_error * np.random.randn(*self.data.V_leakage_pulse_rg.shape)
+
+
+
+        self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp']
 
         # # re-interpolate to higher sampling to maintain uniform ground samples
         self.data = self.data.interp(grg=grg_for_safekeeping, method="linear")

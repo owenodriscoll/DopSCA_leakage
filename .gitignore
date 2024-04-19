@@ -8,3 +8,4 @@ ML_analyses
 *.nc
 data_processed
 *.egg-info
+.vscode
