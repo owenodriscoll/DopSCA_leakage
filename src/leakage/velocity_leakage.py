@@ -15,6 +15,7 @@ from stereoid.oceans.GMF.cmod5n import cmod5n_inverse, cmod5n_forward
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 
 from .misc import round_to_hour, angular_difference, calculate_distance, era5_wind_point, era5_wind_area
+from .add_dca import DCA_helper
 
 from dataclasses import dataclass
 import types
@@ -24,7 +25,7 @@ from typing import Callable, Union, List, Dict, Any
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and grid_spacing can lead to artifacts, maybe interpolation?
 # FIXME consider gain compensation in range (weighting beam backscatter weight)
-# FIXME maybe not use lienar for inetrpolation from slant range to ground range?
+# FIXME maybe not use linear for interpolation from slant range to ground range?
 
 
 # TODO add option to include geophysical Doppler
@@ -55,6 +56,46 @@ from typing import Callable, Union, List, Dict, Any
 
 # constants
 c = 3E8
+
+
+def integrate_beam_along_azimuth(x:xr.DataArray|xr.Dataset, azimuth_dim: str = 'az_idx', skipna: bool = False) -> xr.DataArray | xr.Dataset:
+    """
+    integrates input array/dataset along azimuthal beam pattern
+
+    Input
+    -----
+    x: xr.DataArray | xr.Dataset, 
+        array or dataset of arrays which to integrate over beam
+    azimuth_dim: str,
+        Name of azimuthal dimension over which to integrate beam, default is 'az_idx'
+    skipna: bool,
+        whether to skip (ignore) nans, default is False
+
+    Return
+    ------
+    integrated_beam: xr.DataArray | xr.Dataset,
+        input features integrated along the beam's azimuth 
+    """
+
+    integrated_beam = x.sum(dim=azimuth_dim, skipna=skipna)
+    return integrated_beam
+
+def angular_projection_factor(inc_original, inc_new = 90) -> float:
+    """
+    Computes multiplication factor to convert vector from one incidence to new one, e.g. from slant range to horizontal w.r.t. to the surface (if inc_new = 90)
+
+    Input
+    -----
+    inc_original: float, array-like 
+        incidence angle w.r.t. horizontal of vector, in degrees
+    inc_new: float,array-like 
+        new incidence angle in degrees. Defaults to 0 degrees (horizontal)
+
+    Return:
+    ------
+    factor with which to multiply original vector to find projected vector's magnitude
+    """
+    return np.sin(np.deg2rad(inc_new))/np.sin(np.deg2rad(inc_original))
 
 
 @dataclass
@@ -677,7 +718,7 @@ class S1DopplerLeakage:
         """
         Computes Line of Sight (LoS) leakage Doppler and velocity considering the beam pattern, nrcs weighting and geometric Doppler
         NOTE range-dependend gain compensation (weight_rg) returns overestimated signal at sidelobe nulls
-        NOTE assumes no squint
+        NOTE assumes no squint and a flat Earth
         NOTE computes LoS Dopplers
         NOTE backscatter weight calculated per range line
 
@@ -688,7 +729,7 @@ class S1DopplerLeakage:
         """
 
         # compute geometrical doppler, beam pattern and nrcs weigths
-        self.data['elevation_angle'] = np.radians(self.data['inc_scatt_eqv'])
+        self.data['elevation_angle'] = np.radians(self.data['inc_scatt_eqv']) # NOTE assumes flat Earth
         self.data['dop_geom'] = 2 / self.Lambda * self.vx_sat * np.sin(self.data['az_angle_wrt_boresight']) * np.sin(self.data['elevation_angle']) # eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming 
         self.data['nrcs_weight'] = (self.data['nrcs_scat_eqv'] / self.data['nrcs_scat_eqv'].mean(dim=['az_idx'])) 
 
@@ -697,12 +738,12 @@ class S1DopplerLeakage:
         # geometrical Doppler is interpreted as LoS motion, because right-looking beam with no squint assumed (i.e. azimuthal angle w.r.t. boresight ignored and replaced wiht "1") 
         self.data['V_leakage'] = self.Lambda / 2 * self.data['dop_beam_weighted'] / ( np.sin(self.data['elevation_angle'])) # using the equivalent scatterometer incidence angle
 
-        gain_compensation = (self.data['beam']).sum(dim='az_idx', skipna=False)
-
-        # calculate scatt equivalent nrcs
-        self.data['nrcs_scat'] = (self.data['nrcs_scat_eqv'] * self.data['beam']).sum(dim='az_idx', skipna=False) / gain_compensation
+        gain_compensation = integrate_beam_along_azimuth(self.data['beam'])
+         
+        # calculate scatterometer nrcs at scatterometer resolution (integrate nrcs)
+        self.data['nrcs_scat'] = integrate_beam_along_azimuth(self.data['nrcs_scat_eqv'] * self.data['beam']) / gain_compensation
         # sum over azimuth to receive range-slow_time results
-        self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = (self.data[['dop_beam_weighted', 'V_leakage']]).sum(dim='az_idx', skipna=False) / gain_compensation
+        self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = integrate_beam_along_azimuth(self.data[['dop_beam_weighted', 'V_leakage']]) / gain_compensation
         
         # add attribute
         self.data['V_leakage_pulse_rg'] = self.data['V_leakage_pulse_rg'].assign_attrs(units= 'm/s', description = 'Line of Sight velocity ')
@@ -761,15 +802,6 @@ class S1DopplerLeakage:
         # convert to xarray and add to data, interpolate using nearest for pulse pair 
         V_pp = xr.DataArray(V_pp, dims = ['grg', 'slow_time'], coords= [grg_coarse, self.data['slow_time']])
         self.data['V_pp'] = V_pp.interp(grg=self.data['grg'], method="nearest")
-
-        # V_leakage_pulse_rg_at_pp = self.data['V_leakage_pulse_rg'].interp(grg=grg_coarse, method="linear")
-        # V_leakage_pulse_rg_at_pp_w_pp = V_leakage_pulse_rg_at_pp/V_leakage_pulse_rg_at_pp*self.velocity_error*np.random.randn(*V_leakage_pulse_rg_at_pp.shape)
-        # self.data['V_sigma'] = V_leakage_pulse_rg_at_pp_w_pp.interp(grg=self.data['grg'], method="nearest")
-        # 
-        # np.random.seed(self.random_state)
-        # pulse_pair_noise = self.velocity_error * np.random.randn(*self.data.V_leakage_pulse_rg.shape)
-
-
 
         self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp']
 
@@ -878,8 +910,49 @@ class S1DopplerLeakage:
         self.compute_leakage_velocity()
         self.compute_leakage_velocity_estimate()
 
-        self.data[data_to_return] = self.data[data_to_return].chunk('auto').compute()
+        self.data[data_to_return] = self.data[data_to_return].chunk('auto').persist()
         return
     
 
 
+
+def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> S1DopplerLeakage:
+    """function to add computed dca to S1DopplerLeakage class""" 
+
+    obj_copy = copy.deepcopy(cls)
+
+    dca_interp = DCA_helper(filenames=files_dca,
+        latitudes=obj_copy.S1_file.latitude.values,
+        longitudes=obj_copy.S1_file.longitude.values).add_dca()
+
+    # add interpolated DCA to S1 file
+    obj_copy.S1_file['dca'] = (['azimuth_time', 'ground_range'], dca_interp)
+    obj_copy.create_dataset()
+    obj_copy.data['dca_s1'] = (['az', 'grg'], obj_copy.S1_file['dca'].data)
+    obj_copy.create_beam_mask()
+    obj_copy.data = obj_copy.data.astype('float32')
+
+    reprojection_factor = angular_projection_factor(
+        inc_original = cls.data['inc'],
+        inc_new = cls.data['inc_scatt_eqv']
+    )
+
+    obj_copy.data['dca_scatt'] = obj_copy.data['dca_s1'] * reprojection_factor
+
+    gain_compensation = integrate_beam_along_azimuth(cls.data['beam'])
+    cls.data['dca_pulse_rg'] = integrate_beam_along_azimuth(
+        (obj_copy.data['dca_scatt'] * cls.data['beam'] * cls.data['nrcs_weight'])
+     ) / gain_compensation
+    cls.data['doppler_w_dca_pulse_rg'] = integrate_beam_along_azimuth(
+        (obj_copy.data['dca_scatt'] + cls.data['dop_geom']) * cls.data['beam'] * cls.data['nrcs_weight']
+     ) / gain_compensation
+    
+    # perform averaging as prescribed in cls
+    scenes_to_average = ['doppler_w_dca_pulse_rg', 'dca_pulse_rg']
+    scenes_averaged = [i+'subscene' for i in scenes_to_average]
+    cls.data[scenes_averaged] = cls.data[scenes_to_average].rolling(grg=cls.grg_N, slow_time=cls.slow_time_N, center=True).mean()
+
+    # a bit of reschuffling of coordinates
+    cls.data = cls.data.transpose('az_idx', 'grg', 'slow_time').chunk('auto')
+    cls.data[scenes_to_average + scenes_averaged] = cls.data[scenes_to_average + scenes_averaged].persist()
+    return cls

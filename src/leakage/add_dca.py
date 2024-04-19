@@ -4,9 +4,10 @@ import xarray as xr
 from scipy.interpolate import LinearNDInterpolator
 from dataclasses import dataclass
 from typing import Callable, Union, Sequence
+import copy
 
 @dataclass
-class DCA:
+class DCA_helper:
 
     filenames: list[str]
     latitudes: Union[float, Sequence[float]]
@@ -64,4 +65,7 @@ class DCA:
         self.load_dca()
         self.interpolate_dca()
         return self.dca_interp
-        
+    
+
+
+
