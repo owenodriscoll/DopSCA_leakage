@@ -19,3 +19,6 @@ Clone environment
 Navigate to insatlled directory and pip install other requirements
 
 `pip install -e .`
+
+For development and testing
+`pip install -e .[test]`

@@ -15,7 +15,7 @@ classifiers = [
 
 
 dependencies = [
-  "xsar",
+  "xsar[S1]",
   "dask",
   "xarray",
   "drama",
@@ -32,6 +32,9 @@ dependencies = [
   "joblib",
   "cdsapi"
 ]
+
+[project.optional-dependencies]
+test = ['pytest']
 
 
 [project.urls]
