@@ -42,6 +42,7 @@ class DCA_helper:
         # drop fill values
         df.where(abs(df) < 1e10, np.nan, inplace=True)
         df.dropna(inplace=True)
+        df = df.astype(np.float32)
         self.df = df
 
 

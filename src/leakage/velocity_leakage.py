@@ -28,7 +28,7 @@ from typing import Callable, Union, List, Dict, Any
 # FIXME maybe not use linear for interpolation from slant range to ground range?
 
 
-# TODO add option to include geophysical Doppler
+# TODO add slant to ground range beyond boresight (non squinted), now only exactly on boresight
 # TODO add land mask filter
 # TODO add dask chunking
 # TODO add docstrings
@@ -52,6 +52,7 @@ from typing import Callable, Union, List, Dict, Any
 # NOTE Assumes no squint in:
     # NOTE beam mask construction
     # NOTE velocity variance calculation from coherence loss
+    # NOTE slant to ground range
 
 
 # constants
@@ -91,8 +92,8 @@ def angular_projection_factor(inc_original, inc_new = 90) -> float:
     inc_new: float,array-like 
         new incidence angle in degrees. Defaults to 0 degrees (horizontal)
 
-    Return:
-    ------
+    Returns
+    -------
     factor with which to multiply original vector to find projected vector's magnitude
     """
     return np.sin(np.deg2rad(inc_new))/np.sin(np.deg2rad(inc_original))
@@ -114,8 +115,8 @@ def dop2vel(Doppler, Lambda, angle_incidence, angle_azimuth, degrees = True):
     degrees: bool,
         whether input angles are provided in degrees or radians
 
-    Return:
-    ------
+    Return
+    -------
     velocity: float,
         relative velocity in m/s of surface or object w.r.t to the other
     """
@@ -142,8 +143,8 @@ def vel2dop(velocity, Lambda, angle_incidence, angle_azimuth, degrees = True):
     degrees: bool,
         whether input angles are provided in degrees or radians
 
-    Return:
-    ------
+    Returns
+    -------
     Doppler: float,
         frequency shift corresponding to input geometry and velocity, in Hz
     """
@@ -153,7 +154,39 @@ def vel2dop(velocity, Lambda, angle_incidence, angle_azimuth, degrees = True):
 
     return 2 / Lambda * velocity * np.sin(angle_azimuth) * np.sin(angle_incidence)
 
+def slant2ground(spacing_slant_range: float|int, height: float|int, ground_range_max: float|int, ground_range_min: float|int) -> float:
+            """
+            Converts a slant range pixel spacing to that projected onto the ground (assuming flat earth)
 
+            Input
+            -----
+            spacing_slant_range:  float|int,
+                slant range grid size, in meters
+            height: float | int,
+                height of platform, in meters
+            ground_range_max: float|int,
+                ground range projected maximum distance from satellite
+            ground_range_min: float|int,
+                ground range projected minimum distance from satellite  
+            
+            Returns
+            -------
+            new_grg_pixel: float,
+                new ground range pixel spacing, in meters
+            """
+            current_distance = ground_range_max
+            new_grg_pixel = []
+
+            # iteratively compute new pixel spacing starting from the maximum extend
+            while current_distance > ground_range_min:
+                new_grg_pixel.append(current_distance)
+                new_incidence = np.arctan(current_distance / height)
+                current_distance -= (spacing_slant_range / np.sin(new_incidence))
+
+            # reverse order to convert from decreasing to increasing ground ranges
+            new_grg_pixel.reverse()
+
+            return new_grg_pixel
 @dataclass
 class S1DopplerLeakage:
     """
@@ -845,15 +878,14 @@ class S1DopplerLeakage:
             
         # compute approximate ground range spatial resolution of scatterometer (slant range resolution =/= ground range resolution)
         grg_for_safekeeping = self.data.grg
-        total = self.data.grg.max()
-        new_grg_pixel = []
-        while total > self.data.grg.min():
-            new_grg_pixel.append(total.data*1)
-            new_incidence = np.arctan(total / self.z0)
-            total -= (self.grid_spacing / np.sin(new_incidence))
 
-        new_grg_pixel.reverse()
-        self.new_grg_pixel = new_grg_pixel
+        self.new_grg_pixel = slant2ground(
+            spacing_slant_range=self.grid_spacing,
+            height=self.z0,
+            ground_range_max=self.data.grg.max().data*1,
+            ground_range_min=self.data.grg.min().data*1,
+            )
+
         # interpolate data to new grg range pixels (effectively a variable low pass filter)
         self.data = self.data.interp(grg=self.new_grg_pixel, method="linear")
 
@@ -1030,8 +1062,15 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
             angle_azimuth= 90, # the geometric doppler is interpreted as LoS motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
             degrees=True,
         )
+
     cls.data['V_doppler_w_dca_pulse_rg'] = mean_along_azimuth(cls.data['V_doppler_w_dca'])
-    
+
+    # convert computed avriables from slant to ground range resolution prior to spatial averaging
+    grg_for_safekeeping = cls.data.grg
+    vars_slant2ground = ['dca', 'dca_pulse_rg', 'doppler_w_dca', 'doppler_w_dca_pulse_rg', 'V_dca', 'V_dca_pulse_rg', 'V_doppler_w_dca']    
+    temp = cls.data[vars_slant2ground].interp(grg=cls.new_grg_pixel, method="linear")
+    cls.data[vars_slant2ground] = temp.interp(grg=grg_for_safekeeping, method="linear")
+
     # perform averaging as prescribed in cls
     scenes_to_average = ['dca_pulse_rg', 'doppler_w_dca_pulse_rg', 'V_dca_pulse_rg', 'V_doppler_w_dca_pulse_rg']
     scenes_averaged = [i+'_subscene' for i in scenes_to_average]
