@@ -10,7 +10,7 @@ Create a new environment and activate
 
 Conda install GDAL (not enabled from pip)
 
-`conda install GDAL`5
+`conda install GDAL`
 
 Clone environment
 

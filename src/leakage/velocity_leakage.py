@@ -58,7 +58,7 @@ from typing import Callable, Union, List, Dict, Any
 c = 3E8
 
 
-def integrate_beam_along_azimuth(x:xr.DataArray|xr.Dataset, azimuth_dim: str = 'az_idx', skipna: bool = False) -> xr.DataArray | xr.Dataset:
+def mean_along_azimuth(x:xr.DataArray|xr.Dataset, azimuth_dim: str = 'az_idx', skipna: bool = False) -> xr.DataArray | xr.Dataset:
     """
     integrates input array/dataset along azimuthal beam pattern
 
@@ -77,7 +77,7 @@ def integrate_beam_along_azimuth(x:xr.DataArray|xr.Dataset, azimuth_dim: str = '
         input features integrated along the beam's azimuth 
     """
 
-    integrated_beam = x.sum(dim=azimuth_dim, skipna=skipna)
+    integrated_beam = x.mean(dim=azimuth_dim, skipna=skipna)
     return integrated_beam
 
 def angular_projection_factor(inc_original, inc_new = 90) -> float:
@@ -96,6 +96,62 @@ def angular_projection_factor(inc_original, inc_new = 90) -> float:
     factor with which to multiply original vector to find projected vector's magnitude
     """
     return np.sin(np.deg2rad(inc_new))/np.sin(np.deg2rad(inc_original))
+
+def dop2vel(Doppler, Lambda, angle_incidence, angle_azimuth, degrees = True):
+    """
+    Computes velocity corresponding to Doppler shift based on eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming 
+
+    Input
+    -----
+    doppler: float, 
+        relative frequency shift in Hz of surface or object w.r.t to the other
+    Lambda: float,
+        Wavelength of radio wave, in m
+    angle_incidence: float, 
+        incidence angle, in of wave with surface, degrees or radians
+    angle_azimuth: float, 
+        azimuthal angle with respect to boresight (0 for right looking system)
+    degrees: bool,
+        whether input angles are provided in degrees or radians
+
+    Return:
+    ------
+    velocity: float,
+        relative velocity in m/s of surface or object w.r.t to the other
+    """
+
+    if degrees:
+        angle_azimuth, angle_incidence = [np.deg2rad(i) for i in [angle_azimuth, angle_incidence]]
+
+    return Lambda / 2 * Doppler / ( np.sin(angle_azimuth) * np.sin(angle_incidence))
+
+def vel2dop(velocity, Lambda, angle_incidence, angle_azimuth, degrees = True):
+    """
+    Computes Doppler shift corresponding to velocity based on eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming 
+
+    Input
+    -----
+    velocity: float, 
+        relative velocity in m/s of surface or object w.r.t to the other
+    Lambda: float,
+        Wavelength of radio wave, in m
+    angle_incidence: float, 
+        incidence angle, in of wave with surface, degrees or radians
+    angle_azimuth: float, 
+        azimuthal angle with respect to boresight (0 for right looking system)
+    degrees: bool,
+        whether input angles are provided in degrees or radians
+
+    Return:
+    ------
+    Doppler: float,
+        frequency shift corresponding to input geometry and velocity, in Hz
+    """
+
+    if degrees:
+        angle_azimuth, angle_incidence = [np.deg2rad(i) for i in [angle_azimuth, angle_incidence]]
+
+    return 2 / Lambda * velocity * np.sin(angle_azimuth) * np.sin(angle_incidence)
 
 
 @dataclass
@@ -729,21 +785,33 @@ class S1DopplerLeakage:
         """
 
         # compute geometrical doppler, beam pattern and nrcs weigths
-        self.data['elevation_angle'] = np.radians(self.data['inc_scatt_eqv']) # NOTE assumes flat Earth
-        self.data['dop_geom'] = 2 / self.Lambda * self.vx_sat * np.sin(self.data['az_angle_wrt_boresight']) * np.sin(self.data['elevation_angle']) # eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming 
         self.data['nrcs_weight'] = (self.data['nrcs_scat_eqv'] / self.data['nrcs_scat_eqv'].mean(dim=['az_idx'])) 
+        self.data['beam_weight'] = (self.data['beam'] / self.data['beam'].mean(dim=['az_idx'])) 
+        self.data['elevation_angle'] = np.radians(self.data['inc_scatt_eqv']) # NOTE assumes flat Earth
 
-        # compute weighted received Doppler and resulting apparent LOS velocity
-        self.data['dop_beam_weighted'] = self.data['dop_geom'] * self.data['beam'] * self.data['nrcs_weight']
-        # geometrical Doppler is interpreted as LoS motion, because right-looking beam with no squint assumed (i.e. azimuthal angle w.r.t. boresight ignored and replaced wiht "1") 
-        self.data['V_leakage'] = self.Lambda / 2 * self.data['dop_beam_weighted'] / ( np.sin(self.data['elevation_angle'])) # using the equivalent scatterometer incidence angle
+        self.data['dop_geom'] = vel2dop(
+            velocity=self.vx_sat,
+            Lambda=self.Lambda,
+            angle_incidence=self.data['elevation_angle'],
+            angle_azimuth=self.data['az_angle_wrt_boresight'],
+            degrees=False,
+        ) 
 
-        gain_compensation = integrate_beam_along_azimuth(self.data['beam'])
-         
+        self.data['dop_beam_weighted'] = self.data['dop_geom'] * self.data['beam_weight'] * self.data['nrcs_weight']
+
+        # beam and backscatter weighted geometric Doppler is interpreted as geophysical Doppler, i.e. Leakage
+        self.data['V_leakage'] = dop2vel(
+            Doppler=self.data['dop_beam_weighted'],
+            Lambda=self.Lambda,
+            angle_incidence=self.data['elevation_angle'],
+            angle_azimuth= np.pi/2, # the geometric doppler is interpreted as LoS motion, so azimuth angle component must result in value of 1 (i.e. pi/2)
+            degrees=False,
+        )
+        
         # calculate scatterometer nrcs at scatterometer resolution (integrate nrcs)
-        self.data['nrcs_scat'] = integrate_beam_along_azimuth(self.data['nrcs_scat_eqv'] * self.data['beam']) / gain_compensation
+        self.data['nrcs_scat'] = mean_along_azimuth(self.data['nrcs_scat_eqv'] * self.data['beam_weight'])
         # sum over azimuth to receive range-slow_time results
-        self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = integrate_beam_along_azimuth(self.data[['dop_beam_weighted', 'V_leakage']]) / gain_compensation
+        self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = mean_along_azimuth(self.data[['dop_beam_weighted', 'V_leakage']])
         
         # add attribute
         self.data['V_leakage_pulse_rg'] = self.data['V_leakage_pulse_rg'].assign_attrs(units= 'm/s', description = 'Line of Sight velocity ')
@@ -802,10 +870,10 @@ class S1DopplerLeakage:
         # convert to xarray and add to data, interpolate using nearest for pulse pair 
         V_pp = xr.DataArray(V_pp, dims = ['grg', 'slow_time'], coords= [grg_coarse, self.data['slow_time']])
         self.data['V_pp'] = V_pp.interp(grg=self.data['grg'], method="nearest")
-
+        self.data = self.data.astype('float32')
         self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp']
 
-        # # re-interpolate to higher sampling to maintain uniform ground samples
+        # re-interpolate to higher sampling to maintain uniform ground samples
         self.data = self.data.interp(grg=grg_for_safekeeping, method="linear")
 
         # low-pass filter scatterometer data to subscene resolution
@@ -916,7 +984,7 @@ class S1DopplerLeakage:
 
 
 
-def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> S1DopplerLeakage:
+def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
     """function to add computed dca to S1DopplerLeakage class""" 
 
     obj_copy = copy.deepcopy(cls)
@@ -938,21 +1006,38 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> S1DopplerLeaka
     )
 
     obj_copy.data['dca_scatt'] = obj_copy.data['dca_s1'] * reprojection_factor
+    
+    cls.data['dca'] = obj_copy.data['dca_scatt'] * cls.data['beam_weight'] * cls.data['nrcs_weight']
+    cls.data['dca_pulse_rg'] = mean_along_azimuth(cls.data['dca'])
+    cls.data['doppler_w_dca'] =  (obj_copy.data['dca_scatt'] + cls.data['dop_geom']) * cls.data['beam_weight'] * cls.data['nrcs_weight']
+    cls.data['doppler_w_dca_pulse_rg'] = mean_along_azimuth(cls.data['doppler_w_dca'])
+    
+    cls.data = cls.data.astype('float32')
 
-    gain_compensation = integrate_beam_along_azimuth(cls.data['beam'])
-    cls.data['dca_pulse_rg'] = integrate_beam_along_azimuth(
-        (obj_copy.data['dca_scatt'] * cls.data['beam'] * cls.data['nrcs_weight'])
-     ) / gain_compensation
-    cls.data['doppler_w_dca_pulse_rg'] = integrate_beam_along_azimuth(
-        (obj_copy.data['dca_scatt'] + cls.data['dop_geom']) * cls.data['beam'] * cls.data['nrcs_weight']
-     ) / gain_compensation
+    cls.data['V_dca'] = dop2vel(
+            Doppler=cls.data['dca'],
+            Lambda=cls.Lambda,
+            angle_incidence=cls.data['inc_scatt_eqv'],
+            angle_azimuth= 90, # the geometric doppler is interpreted as LoS motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
+            degrees=True,
+        )
+    cls.data['V_dca_pulse_rg'] = mean_along_azimuth(cls.data['V_dca'])
+
+    cls.data['V_doppler_w_dca'] = dop2vel(
+            Doppler=cls.data['doppler_w_dca'],
+            Lambda=cls.Lambda,
+            angle_incidence=cls.data['inc_scatt_eqv'],
+            angle_azimuth= 90, # the geometric doppler is interpreted as LoS motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
+            degrees=True,
+        )
+    cls.data['V_doppler_w_dca_pulse_rg'] = mean_along_azimuth(cls.data['V_doppler_w_dca'])
     
     # perform averaging as prescribed in cls
-    scenes_to_average = ['doppler_w_dca_pulse_rg', 'dca_pulse_rg']
-    scenes_averaged = [i+'subscene' for i in scenes_to_average]
+    scenes_to_average = ['dca_pulse_rg', 'doppler_w_dca_pulse_rg', 'V_dca_pulse_rg', 'V_doppler_w_dca_pulse_rg']
+    scenes_averaged = [i+'_subscene' for i in scenes_to_average]
     cls.data[scenes_averaged] = cls.data[scenes_to_average].rolling(grg=cls.grg_N, slow_time=cls.slow_time_N, center=True).mean()
 
     # a bit of reschuffling of coordinates
     cls.data = cls.data.transpose('az_idx', 'grg', 'slow_time').chunk('auto')
     cls.data[scenes_to_average + scenes_averaged] = cls.data[scenes_to_average + scenes_averaged].persist()
-    return cls
+    return 
