@@ -520,7 +520,7 @@ class S1DopplerLeakage:
                 era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str + '.nc' in s][0]
             except:
                 #  if not, try to find single estimate hour ERA5 wind file
-                era5_filename = f"era5_{yy}{mm:02d}{dd:02d}h{time}_lat{latmean:.2f}_lon{lonmean:.2f}.nc"
+                era5_filename = f"era5_{yy}{mm:02d}{dd:02d}h{time}_lat{latmean:.1f}_lon{lonmean:.1f}.nc"
                 era5_filename = era5_filename.replace('.', '_',  2)
                 if not self.era5_directory is None:
                     era5_filename = os.path.join(self.era5_directory, era5_filename)
@@ -1021,14 +1021,16 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
 
     obj_copy = copy.deepcopy(cls)
 
-    dca_interp = DCA_helper(filenames=files_dca,
+    dca_interp, wb_interp = DCA_helper(filenames=files_dca,
         latitudes=obj_copy.S1_file.latitude.values,
         longitudes=obj_copy.S1_file.longitude.values).add_dca()
 
     # add interpolated DCA to S1 file
     obj_copy.S1_file['dca'] = (['azimuth_time', 'ground_range'], dca_interp)
+    obj_copy.S1_file['wb'] = (['azimuth_time', 'ground_range'], wb_interp)
     obj_copy.create_dataset()
     obj_copy.data['dca_s1'] = (['az', 'grg'], obj_copy.S1_file['dca'].data)
+    obj_copy.data['wb_s1'] = (['az', 'grg'], obj_copy.S1_file['wb'].data)
     obj_copy.create_beam_mask()
     obj_copy.data = obj_copy.data.astype('float32')
 
@@ -1038,22 +1040,25 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
     )
 
     obj_copy.data['dca_scatt'] = obj_copy.data['dca_s1'] * reprojection_factor
+    obj_copy.data['wb_scatt'] = obj_copy.data['wb_s1'] * reprojection_factor
     
-    cls.data['dca'] = obj_copy.data['dca_scatt'] * cls.data['beam_weight'] * cls.data['nrcs_weight']
-    cls.data['dca_pulse_rg'] = mean_along_azimuth(cls.data['dca'])
+    
+    cls.data[['dca', 'wb']] = obj_copy.data[['dca_scatt', 'wb_scatt']] * cls.data['beam_weight'] * cls.data['nrcs_weight']
+    cls.data[['dca_pulse_rg', 'wb_pulse_rg']] = mean_along_azimuth(cls.data[['dca', 'wb']] )
     cls.data['doppler_w_dca'] =  (obj_copy.data['dca_scatt'] + cls.data['dop_geom']) * cls.data['beam_weight'] * cls.data['nrcs_weight']
     cls.data['doppler_w_dca_pulse_rg'] = mean_along_azimuth(cls.data['doppler_w_dca'])
     
     cls.data = cls.data.astype('float32')
 
-    cls.data['V_dca'] = dop2vel(
-            Doppler=cls.data['dca'],
+
+    cls.data[['V_dca', 'V_wb']] = dop2vel(
+            Doppler=cls.data[['dca', 'wb']],
             Lambda=cls.Lambda,
             angle_incidence=cls.data['inc_scatt_eqv'],
             angle_azimuth= 90, # the geometric doppler is interpreted as LoS motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
             degrees=True,
         )
-    cls.data['V_dca_pulse_rg'] = mean_along_azimuth(cls.data['V_dca'])
+    cls.data[['V_dca_pulse_rg', 'V_wb_pulse_rg']] = mean_along_azimuth(cls.data[['V_dca', 'V_wb']])
 
     cls.data['V_doppler_w_dca'] = dop2vel(
             Doppler=cls.data['doppler_w_dca'],
@@ -1067,12 +1072,12 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
 
     # convert computed avriables from slant to ground range resolution prior to spatial averaging
     grg_for_safekeeping = cls.data.grg
-    vars_slant2ground = ['dca', 'dca_pulse_rg', 'doppler_w_dca', 'doppler_w_dca_pulse_rg', 'V_dca', 'V_dca_pulse_rg', 'V_doppler_w_dca']    
+    vars_slant2ground = ['wb', 'wb_pulse_rg', 'dca', 'dca_pulse_rg', 'doppler_w_dca', 'doppler_w_dca_pulse_rg', 'V_wb', 'V_dca', 'V_dca_pulse_rg', 'V_wb_pulse_rg', 'V_doppler_w_dca']    
     temp = cls.data[vars_slant2ground].interp(grg=cls.new_grg_pixel, method="linear")
     cls.data[vars_slant2ground] = temp.interp(grg=grg_for_safekeeping, method="linear")
 
     # perform averaging as prescribed in cls
-    scenes_to_average = ['dca_pulse_rg', 'doppler_w_dca_pulse_rg', 'V_dca_pulse_rg', 'V_doppler_w_dca_pulse_rg']
+    scenes_to_average = ['wb_pulse_rg', 'V_wb_pulse_rg', 'dca_pulse_rg', 'doppler_w_dca_pulse_rg', 'V_dca_pulse_rg', 'V_doppler_w_dca_pulse_rg']
     scenes_averaged = [i+'_subscene' for i in scenes_to_average]
     cls.data[scenes_averaged] = cls.data[scenes_to_average].rolling(grg=cls.grg_N, slow_time=cls.slow_time_N, center=True).mean()
 
