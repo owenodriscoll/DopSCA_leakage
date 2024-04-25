@@ -155,38 +155,40 @@ def vel2dop(velocity, Lambda, angle_incidence, angle_azimuth, degrees = True):
     return 2 / Lambda * velocity * np.sin(angle_azimuth) * np.sin(angle_incidence)
 
 def slant2ground(spacing_slant_range: float|int, height: float|int, ground_range_max: float|int, ground_range_min: float|int) -> float:
-            """
-            Converts a slant range pixel spacing to that projected onto the ground (assuming flat earth)
+    """
+    Converts a slant range pixel spacing to that projected onto the ground (assuming flat earth)
 
-            Input
-            -----
-            spacing_slant_range:  float|int,
-                slant range grid size, in meters
-            height: float | int,
-                height of platform, in meters
-            ground_range_max: float|int,
-                ground range projected maximum distance from satellite
-            ground_range_min: float|int,
-                ground range projected minimum distance from satellite  
-            
-            Returns
-            -------
-            new_grg_pixel: float,
-                new ground range pixel spacing, in meters
-            """
-            current_distance = ground_range_max
-            new_grg_pixel = []
+    Input
+    -----
+    spacing_slant_range:  float|int,
+        slant range grid size, in meters
+    height: float | int,
+        height of platform, in meters
+    ground_range_max: float|int,
+        ground range projected maximum distance from satellite
+    ground_range_min: float|int,
+        ground range projected minimum distance from satellite  
+    
+    Returns
+    -------
+    new_grg_pixel: float,
+        new ground range pixel spacing, in meters
+    """
+    current_distance = ground_range_max
+    new_grg_pixel = []
 
-            # iteratively compute new pixel spacing starting from the maximum extend
-            while current_distance > ground_range_min:
-                new_grg_pixel.append(current_distance)
-                new_incidence = np.arctan(current_distance / height)
-                current_distance -= (spacing_slant_range / np.sin(new_incidence))
+    # iteratively compute new pixel spacing starting from the maximum extend
+    while current_distance > ground_range_min:
+        new_grg_pixel.append(current_distance)
+        new_incidence = np.arctan(current_distance / height)
+        current_distance -= (spacing_slant_range / np.sin(new_incidence))
 
-            # reverse order to convert from decreasing to increasing ground ranges
-            new_grg_pixel.reverse()
+    # reverse order to convert from decreasing to increasing ground ranges
+    new_grg_pixel.reverse()
 
-            return new_grg_pixel
+    return new_grg_pixel
+
+
 @dataclass
 class S1DopplerLeakage:
     """
@@ -946,7 +948,7 @@ class S1DopplerLeakage:
 
             # NOTE assumed that backscatter could be obtained from mid beam from pulses prior to pulse pair and during pulse pair
             # NOTE which would be equivalent to two looks for nrcs, i.e. speckle decreased by np.sqrt(2)
-            noise_multiplier /= np.sqrt(2) 
+            # noise_multiplier /= np.sqrt(2) 
         elif not self._speckle_noise:
             noise_multiplier = 1
 
