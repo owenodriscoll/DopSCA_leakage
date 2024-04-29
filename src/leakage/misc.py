@@ -6,6 +6,7 @@ import joblib
 import sys
 import io
 import warnings
+import xrft
 
 def round_to_hour(dt):
     dt_start_of_hour = dt.replace(minute=0, second=0, microsecond=0)
@@ -195,3 +196,18 @@ def prediction_ML(filename: str, model_ML: str, field_data: str = 'nrcs_scat_sub
     # add to data
     data['estimate'] = (['grg', 'slow_time'], result.T)
     return data
+
+
+def power_spectrum_custom(da, scaling = 'spectrum', detrend = 'constant', window = 'hann', window_correction = 'True'):
+    condition_fill = np.isfinite(da)
+    da_filled = xr.where(condition_fill, da, 0)
+
+    p2 =xrft.power_spectrum(
+        da = da_filled,
+        # dim = 'slow_time',
+        scaling = scaling,
+        detrend = detrend,
+        window = window,
+        window_correction = window_correction
+        )
+    return p2

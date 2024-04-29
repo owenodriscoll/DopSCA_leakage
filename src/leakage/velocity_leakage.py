@@ -7,6 +7,7 @@ import xsar
 import dask
 import copy
 import pyproj
+import xrft
 import bottleneck # implicitely loaded somewhere
 import numpy as np
 import xarray as xr
@@ -188,6 +189,93 @@ def slant2ground(spacing_slant_range: float|int, height: float|int, ground_range
 
     return new_grg_pixel
 
+def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fill_nans: bool = False, rechunk: bool = False) -> xr.DataArray:
+    """
+    Low pass filtering am xarray dataset in the Fourier domain using xrft
+
+    Assumes both x and y have same dimensions
+
+    Input:
+    ------
+    da: xr.DataArray,
+        Data to be filtered
+    cutoff_frequency: float,
+        threshold frequnecy, greater frequencies are filtered out
+    fill_nans: bool,
+        Whether to replace non-finite values (e.g. nans and inifinities) with 0
+    rechunk: bool,
+        Whether the data should be rechunked so that no chunks exist along fft dimension
+
+    Returns:
+    --------
+    da_filt: xr.DataArray,
+        The real part of low-pass filtered data
+    """
+
+    if fill_nans:
+        condition_fill = np.isfinite(da)
+        da_filled = xr.where(condition_fill, da, 0)
+    else: 
+        da_filled = da
+
+    if rechunk:
+        da_spec = xrft.fft(da_filled.chunk({**da_filled.sizes}), chunks_to_segmentsbool = False)
+    else:
+        da_spec = xrft.fft(da_filled)
+
+    dim_grg_freq, dim_az_freq = [*da_spec.sizes]
+
+    filter_az_freq = abs(da_spec[dim_az_freq]) <=  cutoff_frequency
+    filter_grg_freq = abs(da_spec[dim_grg_freq]) <=  cutoff_frequency
+
+    conditions_low_pass = filter_az_freq & filter_grg_freq
+    da_spec_filt = da_spec.where(conditions_low_pass, 0)
+
+    da_filt = xrft.ifft(da_spec_filt).real
+
+    if fill_nans:
+        da_filt = da_filt.where(condition_fill.data, np.nan)
+
+    return da_filt
+
+def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fill_nans: bool = False, rechunk: bool = False) -> xr.Dataset:
+    """
+    Wrapper of low_pass_filter_2D for each array in dataset
+
+    Assumes both x and y have same dimensions
+
+    Input:
+    ------
+    ds: xr.Dataset,
+        Data to be filtered
+    cutoff_frequency: float,
+        threshold frequnecy, greater frequencies are filtered out
+    fill_nans: bool,
+        Whether to replace non-finite values (e.g. nans and inifinities) with 0
+    rechunk: bool,
+        Whether the data should be rechunked so that no chunks exist along fft dimension
+
+    Returns:
+    --------
+    ds_filt: xr.Dataset,
+        The real part of low-pass filtered data
+    """
+
+    ds_filt = xr.Dataset({
+        var + '_subscene': low_pass_filter_2D(ds[var], 
+                                              cutoff_frequency = cutoff_frequency, 
+                                              fill_nans = fill_nans,
+                                              rechunk = rechunk
+                                              ) for var in ds
+        })
+
+    # ensure dimensions of fft match those of input (sometimes rounding errors can occur)
+    dimensions = [*ds.sizes]
+    for dimension in dimensions:
+        ds_filt[dimension] = ds[dimension]
+
+    return ds_filt
+
 
 @dataclass
 class S1DopplerLeakage:
@@ -317,6 +405,10 @@ class S1DopplerLeakage:
     def speckle_noise(noise_shape: tuple, random_state: int = 42):
         """
         Generates multiplicative speckle noise for intensity (i.e. squared) with mean value of 1
+
+        
+        NOTE should add obtion to equivalent to multiple looks for nrcs, i.e. speckle spread decreased by np.sqrt(2)
+        noise_real /= np.sqrt(2) 
 
         Assumes Gaussian noise for real and imaginary components and uniform phase
         """
@@ -881,6 +973,7 @@ class S1DopplerLeakage:
         # compute approximate ground range spatial resolution of scatterometer (slant range resolution =/= ground range resolution)
         grg_for_safekeeping = self.data.grg
 
+        # NOTE to do this nicely the azimuth angle should also be taken into account, as it slightly affects local incidence angle
         self.new_grg_pixel = slant2ground(
             spacing_slant_range=self.grid_spacing,
             height=self.z0,
@@ -913,7 +1006,10 @@ class S1DopplerLeakage:
         # low-pass filter scatterometer data to subscene resolution
         data_4subscene= ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'V_sigma', 'nrcs_scat']
         data_subscene = [name + '_subscene' for name in data_4subscene]
-        self.data[data_subscene] = self.data[data_4subscene].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
+
+        data_lp = low_pass_filter_2D_dataset(self.data[data_4subscene], cutoff_frequency = 1/self.resolution_product, fill_nans=True, rechunk=True)
+        self.data[data_subscene] = data_lp
+        # self.data[data_subscene] = self.data[data_4subscene].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
         return
 
 
@@ -942,14 +1038,10 @@ class S1DopplerLeakage:
         # interpolate data to new grg range pixels (effectively a variable low pass filter along range)
         nrcs_scat_grg_interpolated = self.data.nrcs_scat.interp(grg=self.new_grg_pixel, method="linear")
 
-        # add speckle noise assuming a single look
+        # add speckle noise
         if self._speckle_noise:
             noise_multiplier = self.speckle_noise(nrcs_scat_grg_interpolated.shape, random_state = self.random_state)
-
-            # NOTE assumed that backscatter could be obtained from mid beam from pulses prior to pulse pair and during pulse pair
-            # NOTE which would be equivalent to two looks for nrcs, i.e. speckle decreased by np.sqrt(2)
-            # noise_multiplier /= np.sqrt(2) 
-        elif not self._speckle_noise:
+        else:
             noise_multiplier = 1
 
         single_look_nrcs = noise_multiplier * nrcs_scat_grg_interpolated
@@ -1081,7 +1173,9 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
     # perform averaging as prescribed in cls
     scenes_to_average = ['wb_pulse_rg', 'V_wb_pulse_rg', 'dca_pulse_rg', 'doppler_w_dca_pulse_rg', 'V_dca_pulse_rg', 'V_doppler_w_dca_pulse_rg']
     scenes_averaged = [i+'_subscene' for i in scenes_to_average]
-    cls.data[scenes_averaged] = cls.data[scenes_to_average].rolling(grg=cls.grg_N, slow_time=cls.slow_time_N, center=True).mean()
+    # cls.data[scenes_averaged] = cls.data[scenes_to_average].rolling(grg=cls.grg_N, slow_time=cls.slow_time_N, center=True).mean()
+    data_lp = low_pass_filter_2D_dataset(cls.data[scenes_to_average], cutoff_frequency = 1/cls.resolution_product, fill_nans=True, rechunk=True)
+    cls.data[scenes_averaged] = data_lp
 
     # a bit of reschuffling of coordinates
     cls.data = cls.data.transpose('az_idx', 'grg', 'slow_time').chunk('auto')
