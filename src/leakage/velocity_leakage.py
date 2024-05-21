@@ -189,7 +189,7 @@ def slant2ground(spacing_slant_range: float|int, height: float|int, ground_range
 
     return new_grg_pixel
 
-def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fill_nans: bool = False, rechunk: bool = False) -> xr.DataArray:
+def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fill_nans: bool = False, return_complex: bool = False) -> xr.DataArray:
     """
     Low pass filtering am xarray dataset in the Fourier domain using xrft
 
@@ -203,8 +203,8 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fill_nans: boo
         threshold frequnecy, greater frequencies are filtered out
     fill_nans: bool,
         Whether to replace non-finite values (e.g. nans and inifinities) with 0
-    rechunk: bool,
-        Whether the data should be rechunked so that no chunks exist along fft dimension
+    return_complex: bool,
+        Whether the imaginary part should be returned or not
 
     Returns:
     --------
@@ -218,7 +218,8 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fill_nans: boo
     else: 
         da_filled = da
 
-    if rechunk:
+    # data is rechunked because fourier transform cannot be performed over chunked dimension 
+    if is_chunked_checker(da_filled):
         da_spec = xrft.fft(da_filled.chunk({**da_filled.sizes}), chunks_to_segmentsbool = False)
     else:
         da_spec = xrft.fft(da_filled)
@@ -231,14 +232,17 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fill_nans: boo
     conditions_low_pass = filter_az_freq & filter_grg_freq
     da_spec_filt = da_spec.where(conditions_low_pass, 0)
 
-    da_filt = xrft.ifft(da_spec_filt).real
+    da_filt = xrft.ifft(da_spec_filt)
+    
+    if not return_complex:
+        da_filt = da_filt.real
 
     if fill_nans:
         da_filt = da_filt.where(condition_fill.data, np.nan)
 
     return da_filt
 
-def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fill_nans: bool = False, rechunk: bool = False) -> xr.Dataset:
+def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fill_nans: bool = False, return_complex: bool = False) -> xr.Dataset:
     """
     Wrapper of low_pass_filter_2D for each array in dataset
 
@@ -252,8 +256,8 @@ def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fill_nan
         threshold frequnecy, greater frequencies are filtered out
     fill_nans: bool,
         Whether to replace non-finite values (e.g. nans and inifinities) with 0
-    rechunk: bool,
-        Whether the data should be rechunked so that no chunks exist along fft dimension
+    return_complex: bool,
+        Whether the imaginary part should be returned or not
 
     Returns:
     --------
@@ -265,7 +269,7 @@ def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fill_nan
         var + '_subscene': low_pass_filter_2D(ds[var], 
                                               cutoff_frequency = cutoff_frequency, 
                                               fill_nans = fill_nans,
-                                              rechunk = rechunk
+                                              return_complex = return_complex,
                                               ) for var in ds
         })
 
@@ -276,6 +280,64 @@ def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fill_nan
 
     return ds_filt
 
+def complex_speckle_noise(noise_shape: tuple, random_state: int = 42):
+    """
+    Generates complex multiplicative speckle noise 
+    
+    Intensity is obtained by (abs(speckle_complex)**2)/2, which has a mean and variance of 1
+
+    Assumes Gaussian noise for real and imaginary components and uniform phase
+    """
+    np.random.seed(random_state)
+    noise_real = np.random.randn(*noise_shape)
+    noise_imag = np.random.randn(*noise_shape)
+    speckle = np.array([complex(a,b) for a, b in zip(noise_real.ravel(), noise_imag.ravel())])
+
+    return speckle.reshape(noise_shape)
+
+def is_chunked_checker(da: xr.DataArray) -> bool:
+    """checks whether inoput datarray is chunked"""
+    return da.chunks is not None and any(da.chunks)
+
+def padding_fourier(da: xr.DataArray, padding: int|tuple, dimension: str) -> xr.DataArray:
+    """
+    Interpolate data by zero-padding in Fourier domain along dimension
+    """
+    if is_chunked_checker(da):
+        da = da.chunk({**da.sizes})
+
+    da_spec = xrft.fft(da, true_amplitude=False) # set to false for same behaviour as np.fft
+    da_spec_padded = xrft.padding.pad(da_spec, {'freq_' + dimension: padding}, constant_values = complex(0,0))
+
+    # data is rechunked because fourier transform cannot be performed over chunked dimension 
+    if is_chunked_checker(da_spec_padded):
+        da_spec_padded = da_spec_padded.chunk({**da_spec_padded.sizes})
+    
+    da_spec_padded *= da_spec_padded.sizes['freq_' + dimension]/da.sizes[dimension] # multiply times factor because to compensate for more samples in Fourier domain
+    da_padded = xrft.ifft(da_spec_padded, true_amplitude=False) # set to false for same behaviour as np.fft
+
+    return da_padded
+
+def da_ones_independent_samples(da: xr.DataArray, dim_to_resample: int = 0, samples_per_indepent_sample: int = 2) -> xr.DataArray:
+    """
+    Creates a new datarray filled with ones whose shape corresponds to the number of independent samples, rather than (oversampled) real samples
+    """
+
+    dim_interp = 'dim_'+str(dim_to_resample)
+    a = da.shape
+    b = np.ones(a)
+    c = xr.DataArray(b)
+    d = c.coarsen({dim_interp: samples_per_indepent_sample} ,boundary='trim').mean()
+    return d
+
+def compute_padding_1D(length_desired: int, length_current: int) -> tuple[int, int]:
+    """
+    Computes how much to pad on both sides of 1D dimension to obtain desired length
+    """
+    assert length_desired > length_current
+    pad_total = length_desired - length_current
+    pad = int(np.ceil(pad_total/2))
+    return pad
 
 @dataclass
 class S1DopplerLeakage:
@@ -331,6 +393,8 @@ class S1DopplerLeakage:
         whether to add artifical noise from coherence loss due to pulse pair mechanism following Cramer Roa lower bound (recommended)
     _speckle_noise: bool
         whether to add artifical speckle to synthesized scatterometer product (recommended)
+    _interpolator: str
+        xarray interp1d complient interpolator
 
     Sources
     -------
@@ -340,7 +404,6 @@ class S1DopplerLeakage:
             Wind Estimation. In 2018 Doppler Oceanography from Space (DOfS) (pp. 1-9). IEEE."
         "Rostan, F., Ulrich, D., Riegger, S., & Østergaard, A. (2016, July). MetoP-SG SCA wind scatterometer design and performance. In 2016 
             IEEE International Geoscience and Remote Sensing Symposium (IGARSS) (pp. 7366-7369). IEEE."
-
 
     Output:
     -------
@@ -370,6 +433,7 @@ class S1DopplerLeakage:
     random_state: int = 42
     _pulsepair_noise: bool = True
     _speckle_noise: bool = True
+    _interpolator: str = 'linear'
 
 
     def __post_init__(self):
@@ -400,25 +464,6 @@ class S1DopplerLeakage:
     @staticmethod
     def decorrelation(tau, T):
         return np.exp(-(tau/T)**2) # 
-
-    @staticmethod
-    def speckle_noise(noise_shape: tuple, random_state: int = 42):
-        """
-        Generates multiplicative speckle noise for intensity (i.e. squared) with mean value of 1
-
-        
-        NOTE should add obtion to equivalent to multiple looks for nrcs, i.e. speckle spread decreased by np.sqrt(2)
-        noise_real /= np.sqrt(2) 
-
-        Assumes Gaussian noise for real and imaginary components and uniform phase
-        """
-        np.random.seed(random_state)
-        noise_real = np.random.randn(*noise_shape)
-        noise_imag = np.random.randn(*noise_shape)
-        noise = np.array([complex(a,b) for a, b in zip(noise_real.ravel(), noise_imag.ravel())])
-        noise = (abs(noise)**2)/2
-
-        return noise.reshape(noise_shape)
 
     @staticmethod
     def pulse_pair_sigma_v(T_pp, T_corr_surface, T_corr_Doppler, SNR, Lambda, N_L = 1):
@@ -980,34 +1025,42 @@ class S1DopplerLeakage:
             ground_range_max=self.data.grg.max().data*1,
             ground_range_min=self.data.grg.min().data*1,
             )
+        # self.new_grg_pixel = self.data.grg
 
-        # interpolate data to new grg range pixels (effectively a variable low pass filter)
-        self.data = self.data.interp(grg=self.new_grg_pixel, method="linear")
+        # ------ interpolate data to new grg range pixels (effectively a variable low pass filter) -------
+        self.data = self.data.interp(grg=self.new_grg_pixel, method=self._interpolator)
 
-        # coarsen the new ground range by factor two
-        grg_coarse = self.data.grg.coarsen(grg = 2,boundary='pad').mean()
-        
-        # fix random state to reproduce pulse pair noise, should be the same for inversion
+        # fix random state 
         np.random.seed(self.random_state)
+        reference = 'V_leakage_pulse_rg'
+        dim_interp = 'grg'
+        shape_ref = self.data[reference].shape
+        da_ones_independent = da_ones_independent_samples(self.data[reference], dim_to_resample= 0, samples_per_indepent_sample=2)
+        V_pp = self.velocity_error * np.random.randn(*da_ones_independent.shape)
+        da_V_pp = V_pp * da_ones_independent
 
-        # calculate pulse pair uncertainty for coarsend resolution
-        shape_pp = (grg_coarse.sizes['grg'], self.data.sizes['slow_time'])
-        V_pp = self.velocity_error*np.random.randn(*shape_pp)
+        pad = compute_padding_1D(length_desired=self.data[reference].sizes[dim_interp], length_current=da_V_pp.sizes['dim_0'])
+        
+        # after padding in the fourieri domain the output is complex
+        V_pp_c = padding_fourier(da_V_pp, padding = (pad, pad), dimension= 'dim_0')
 
-        # convert to xarray and add to data, interpolate using nearest for pulse pair 
-        V_pp = xr.DataArray(V_pp, dims = ['grg', 'slow_time'], coords= [grg_coarse, self.data['slow_time']])
-        self.data['V_pp'] = V_pp.interp(grg=self.data['grg'], method="nearest")
+        # complex part should be negligible
+        V_pp = V_pp_c[:shape_ref[0], :shape_ref[1]]
+        self.V_pp_c = V_pp_c
+
+        self.data['V_pp'] = xr.zeros_like(self.data['V_leakage_pulse_rg']) + V_pp.data
+        self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp'].real
+
+        # ------- re-interpolate to higher sampling to maintain uniform ground samples -------
+        self.data = self.data.interp(grg=grg_for_safekeeping, method=self._interpolator)
         self.data = self.data.astype('float32')
-        self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp']
-
-        # re-interpolate to higher sampling to maintain uniform ground samples
-        self.data = self.data.interp(grg=grg_for_safekeeping, method="linear")
 
         # low-pass filter scatterometer data to subscene resolution
         data_4subscene= ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'V_sigma', 'nrcs_scat']
         data_subscene = [name + '_subscene' for name in data_4subscene]
 
-        data_lp = low_pass_filter_2D_dataset(self.data[data_4subscene], cutoff_frequency = 1/self.resolution_product, fill_nans=True, rechunk=True)
+
+        data_lp = low_pass_filter_2D_dataset(self.data[data_4subscene], cutoff_frequency = 1/ (2*self.resolution_product), fill_nans=True) # FIXME why *2 ?
         self.data[data_subscene] = data_lp
         # self.data[data_subscene] = self.data[data_4subscene].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
         return
@@ -1035,23 +1088,40 @@ class S1DopplerLeakage:
         new_nrcs = np.nan * np.ones_like(self.S1_file[var_nrcs])
         new_inc = np.nan * np.ones_like(self.S1_file[var_nrcs])
 
-        # interpolate data to new grg range pixels (effectively a variable low pass filter along range)
-        nrcs_scat_grg_interpolated = self.data.nrcs_scat.interp(grg=self.new_grg_pixel, method="linear")
-
         # add speckle noise
         if self._speckle_noise:
-            noise_multiplier = self.speckle_noise(nrcs_scat_grg_interpolated.shape, random_state = self.random_state)
+            # noise_multiplier = self.speckle_noise(nrcs_scat_grg_interpolated.shape, random_state = self.random_state)
+
+            reference = 'nrcs_scat'
+            dim_interp = 'grg'
+            nrcs_scat_grg = self.data[reference]
+            nrcs_scat_sl = nrcs_scat_grg.interp(grg=self.new_grg_pixel, method=self._interpolator)
+
+            shape_ref = nrcs_scat_sl.shape
+            da_ones_independent = da_ones_independent_samples(nrcs_scat_sl, dim_to_resample= 0, samples_per_indepent_sample=2)
+            # d = da_ones_independent_samples(test.data.nrcs_scat)
+            speckle_c = complex_speckle_noise(da_ones_independent.shape, random_state=self.random_state)
+            da_speckle_c = speckle_c * da_ones_independent
+
+            # pad in fourier domain
+            pad = compute_padding_1D(length_desired=nrcs_scat_sl.sizes[dim_interp], length_current=da_speckle_c.sizes['dim_0'])
+            da_speckle_c_padded = padding_fourier(da_speckle_c, padding = (pad, pad), dimension= 'dim_0')
+
+            da_speckle_c_padded_cut = da_speckle_c_padded[:shape_ref[0], :shape_ref[1]]
+            self.da_speckle_c_padded_cut = da_speckle_c_padded_cut
+            speckle = abs(da_speckle_c_padded_cut)**2 / 2
+
+            nrcs_scat_sl_speckle = nrcs_scat_sl * speckle.data            
+            # interpolate to grg
+            nrcs_scat_speckle = nrcs_scat_sl_speckle.interp(grg=self.data.grg, method=self._interpolator)
+
         else:
-            noise_multiplier = 1
-
-        single_look_nrcs = noise_multiplier * nrcs_scat_grg_interpolated
-
-        # re-interpolate to higher sampling to maintain uniform ground samples
-        single_look_nrcs = single_look_nrcs.interp(grg=self.data.grg, method="linear")
-
+            # already up and downscaled so not necessary here
+            nrcs_scat_speckle = self.data.nrcs_scat
+    
         # interpolate estimated scatterometer data back to S1 grid size
         slow_time_upsamp = np.linspace(self.data.slow_time[0], self.data.slow_time[-1], idx_end - idx_start) 
-        nrcs_scat_upsamp = single_look_nrcs.T.interp(slow_time = slow_time_upsamp)
+        nrcs_scat_upsamp = nrcs_scat_speckle.T.interp(slow_time = slow_time_upsamp)
         inc_scat_upsamp = self.data.inc_scatt_eqv_cube.mean(dim='az_idx').T.interp(slow_time = slow_time_upsamp)
 
         # apply cropping 
@@ -1174,7 +1244,7 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
     scenes_to_average = ['wb_pulse_rg', 'V_wb_pulse_rg', 'dca_pulse_rg', 'doppler_w_dca_pulse_rg', 'V_dca_pulse_rg', 'V_doppler_w_dca_pulse_rg']
     scenes_averaged = [i+'_subscene' for i in scenes_to_average]
     # cls.data[scenes_averaged] = cls.data[scenes_to_average].rolling(grg=cls.grg_N, slow_time=cls.slow_time_N, center=True).mean()
-    data_lp = low_pass_filter_2D_dataset(cls.data[scenes_to_average], cutoff_frequency = 1/cls.resolution_product, fill_nans=True, rechunk=True)
+    data_lp = low_pass_filter_2D_dataset(cls.data[scenes_to_average], cutoff_frequency = 1/(2*cls.resolution_product), fill_nans=True) # FIXME why *2 ?
     cls.data[scenes_averaged] = data_lp
 
     # a bit of reschuffling of coordinates
