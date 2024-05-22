@@ -12,6 +12,7 @@ import bottleneck # implicitely loaded somewhere
 import numpy as np
 import xarray as xr
 import dask.array as da
+from scipy.signal import firwin
 from stereoid.oceans.GMF.cmod5n import cmod5n_inverse, cmod5n_forward
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 
@@ -189,9 +190,42 @@ def slant2ground(spacing_slant_range: float|int, height: float|int, ground_range
 
     return new_grg_pixel
 
-def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fill_nans: bool = False, return_complex: bool = False) -> xr.DataArray:
+
+def design_low_pass_filter_2D(da_shape: tuple[int, int], cutoff_frequency: float, fs_x: float, fs_y: float, window: str = 'hann'): 
     """
-    Low pass filtering am xarray dataset in the Fourier domain using xrft
+    Design 2D window in time domain given sampling in x- and y-direction and desired cutoff frequency
+
+    Input
+    -----
+    da_shape:  tuple[int, int],
+       tuple containing shape of x- and y-dimension like (x_shape, y_shape)
+    cutoff_frequency: float,
+        threshold frequnecy, greater frequencies are filtered out
+    fs_x: float,
+        sampling along first DataArray dimension in tuple 
+    fs_y: float,
+        sampling along first DataArray dimension in tuple 
+    window: str,
+        window string from scipy.signal.get_window
+
+    Returns
+    -------
+    filter_response: Array[float],
+        2D array with time domain filter response
+    """
+    
+    taps_x = firwin(numtaps = da_shape[0], cutoff=cutoff_frequency, fs=fs_x, pass_zero=True, window=window)
+    taps_y = firwin(numtaps = da_shape[1], cutoff=cutoff_frequency, fs=fs_y, pass_zero=True, window=window)
+
+    #generate 2D field
+    filter_response = np.outer(taps_x, taps_y)
+    
+    return filter_response
+    
+
+def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fs_x: float, fs_y: float, window: str = 'hann', fill_nans: bool = False, return_complex: bool = False) -> xr.DataArray:
+    """
+    Low pass filtering am xarray dataset in the Fourier domain using xrft, scipy.signal.windows and np.fft
 
     Assumes both x and y have same dimensions
 
@@ -201,6 +235,12 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fill_nans: boo
         Data to be filtered
     cutoff_frequency: float,
         threshold frequnecy, greater frequencies are filtered out
+    fs_x: float,
+        sampling along first DataArray dimension in tuple 
+    fs_y: float,
+        sampling along first DataArray dimension in tuple 
+    window: str,
+        window string from scipy.signal.get_window
     fill_nans: bool,
         Whether to replace non-finite values (e.g. nans and inifinities) with 0
     return_complex: bool,
@@ -219,30 +259,27 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fill_nans: boo
         da_filled = da
 
     # data is rechunked because fourier transform cannot be performed over chunked dimension 
+    # shift set to false to prevent clashing fftshifts between np.fft and xrft.fft
     if is_chunked_checker(da_filled):
-        da_spec = xrft.fft(da_filled.chunk({**da_filled.sizes}), chunks_to_segmentsbool = False)
+        da_spec = xrft.fft(da_filled.chunk({**da_filled.sizes}), chunks_to_segmentsbool = False, shift = False)
     else:
-        da_spec = xrft.fft(da_filled)
+        da_spec = xrft.fft(da_filled, shift = False)
 
-    dim_grg_freq, dim_az_freq = [*da_spec.sizes]
+    # design time-domain filter
+    filter_response = design_low_pass_filter_2D(da_spec.shape, cutoff_frequency, fs_x=fs_x, fs_y=fs_y, window=window)
 
-    filter_az_freq = abs(da_spec[dim_az_freq]) <=  cutoff_frequency
-    filter_grg_freq = abs(da_spec[dim_grg_freq]) <=  cutoff_frequency
-
-    conditions_low_pass = filter_az_freq & filter_grg_freq
-    da_spec_filt = da_spec.where(conditions_low_pass, 0)
-
-    da_filt = xrft.ifft(da_spec_filt)
+    # convert to fourier domain and multiply with spectrum (i.e. same as convolving filter with input image)
+    filter_response_fourier = np.fft.fft2(filter_response)
+    da_spec_filt = da_spec * filter_response_fourier
     
     if not return_complex:
         da_filt = da_filt.real
-
     if fill_nans:
         da_filt = da_filt.where(condition_fill.data, np.nan)
 
     return da_filt
 
-def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fill_nans: bool = False, return_complex: bool = False) -> xr.Dataset:
+def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fs_x: float, fs_y: float, window: str = 'hann', fill_nans: bool = False, return_complex: bool = False) -> xr.Dataset:
     """
     Wrapper of low_pass_filter_2D for each array in dataset
 
@@ -254,6 +291,12 @@ def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fill_nan
         Data to be filtered
     cutoff_frequency: float,
         threshold frequnecy, greater frequencies are filtered out
+    fs_x: float,
+        sampling along first DataArray dimension in tuple 
+    fs_y: float,
+        sampling along first DataArray dimension in tuple 
+    window: str,
+        window string from scipy.signal.get_window
     fill_nans: bool,
         Whether to replace non-finite values (e.g. nans and inifinities) with 0
     return_complex: bool,
@@ -268,6 +311,9 @@ def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fill_nan
     ds_filt = xr.Dataset({
         var + '_subscene': low_pass_filter_2D(ds[var], 
                                               cutoff_frequency = cutoff_frequency, 
+                                              fs_x=fs_x,
+                                              fs_y=fs_y,
+                                              window= window,
                                               fill_nans = fill_nans,
                                               return_complex = return_complex,
                                               ) for var in ds
@@ -309,11 +355,11 @@ def padding_fourier(da: xr.DataArray, padding: int|tuple, dimension: str) -> xr.
     da_spec = xrft.fft(da, true_amplitude=False) # set to false for same behaviour as np.fft
     da_spec_padded = xrft.padding.pad(da_spec, {'freq_' + dimension: padding}, constant_values = complex(0,0))
 
-    # data is rechunked because fourier transform cannot be performed over chunked dimension 
+    # data is rechunked because Fourier transform cannot be performed over chunked dimension 
     if is_chunked_checker(da_spec_padded):
         da_spec_padded = da_spec_padded.chunk({**da_spec_padded.sizes})
     
-    da_spec_padded *= da_spec_padded.sizes['freq_' + dimension]/da.sizes[dimension] # multiply times factor because to compensate for more samples in Fourier domain
+    da_spec_padded *= da_spec_padded.sizes['freq_' + dimension]/da.sizes[dimension] # multiply times factor to compensate for more samples in Fourier domain
     da_padded = xrft.ifft(da_spec_padded, true_amplitude=False) # set to false for same behaviour as np.fft
 
     return da_padded
@@ -374,6 +420,8 @@ class S1DopplerLeakage:
         pixel spacing in meters to which Sentinel-1 SAFE files are coarsened
     resolution_product: int
         spatial resolution to which subscene results are averaged, e.g. if resolution_product = 25 km, moving average window is 12.5 km (pixel size permitting)
+    product_averaging_window: str, 'hann'
+        window with which to low pass towards product resolution. Window must be available from scipy.signal.get_window.
     era5_directory: str
         directory containing era5 file. Will look for file containing "{yyyy}{mm}.nc" or "era5{yy}{mm}{dd}h{hh}00_lat{}_lon{}.nc" to load
     era5_file: str
@@ -425,6 +473,7 @@ class S1DopplerLeakage:
     az_footprint_cutoff: int = 80_000                                   # custom
     grid_spacing: int = 75                                              # assuming 150 m ground range resolution, Hoogeboom et al,. (2018)
     resolution_product: int = 25_000                                    # Hoogeboom et al,. (2018)
+    product_averaging_window: str = 'hann'                              # window available from scipy.signal.get_window
     era5_directory: str = "" 
     era5_file: Union[bool, str] = False 
     era5_undersample_factor: int = 10
@@ -994,11 +1043,11 @@ class S1DopplerLeakage:
             wavenumber = 2 * np.pi / self.Lambda
 
             # -- calculates average azimuthal beam standard deviation within -3 dB 
-            beam_db = 10*np.log10(self.data.beam)
+            beam_db = 10 * np.log10(self.data.beam)
             beam_3dB = xr.where((beam_db- beam_db.max(dim = 'az_idx'))< -3, np.nan, 1)*self.data.az_angle_wrt_boresight
             sigma_az_angle = beam_3dB.std(dim = 'az_idx').mean().values*1
 
-            T_corr_Doppler = 1/ (np.sqrt(2) * wavenumber * self.vx_sat * sigma_az_angle) # equation 7 from Rodriguez et al., (2018)
+            T_corr_Doppler = 1 / (np.sqrt(2) * wavenumber * self.vx_sat * sigma_az_angle) # equation 7 from Rodriguez et al., (2018)
             T_pp = 1.15E-4 # intra pulse-pair pulse separation time, Hoogeboom et al., (2018)
             U = 6 # Average wind speed assumed of 6 m/s
             T_corr_surface = 3.29 * self.Lambda / U # Decorrelation time of surface at radio frequency of interest (below eq. 19 Theodosious et al., 2023)
@@ -1025,7 +1074,6 @@ class S1DopplerLeakage:
             ground_range_max=self.data.grg.max().data*1,
             ground_range_min=self.data.grg.min().data*1,
             )
-        # self.new_grg_pixel = self.data.grg
 
         # ------ interpolate data to new grg range pixels (effectively a variable low pass filter) -------
         self.data = self.data.interp(grg=self.new_grg_pixel, method=self._interpolator)
@@ -1041,15 +1089,15 @@ class S1DopplerLeakage:
 
         pad = compute_padding_1D(length_desired=self.data[reference].sizes[dim_interp], length_current=da_V_pp.sizes['dim_0'])
         
-        # after padding in the fourieri domain the output is complex
+        # after padding in the Fourier domain the output is complex, complex part should be negligible
         V_pp_c = padding_fourier(da_V_pp, padding = (pad, pad), dimension= 'dim_0')
 
-        # complex part should be negligible
+        # since iid noise, we can clip time domain to correct dimensions without affecting statistics 
         V_pp = V_pp_c[:shape_ref[0], :shape_ref[1]]
         self.V_pp_c = V_pp_c
 
         self.data['V_pp'] = xr.zeros_like(self.data['V_leakage_pulse_rg']) + V_pp.data
-        self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp'].real
+        self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp'].real # complex part should be negligible
 
         # ------- re-interpolate to higher sampling to maintain uniform ground samples -------
         self.data = self.data.interp(grg=grg_for_safekeeping, method=self._interpolator)
@@ -1059,8 +1107,13 @@ class S1DopplerLeakage:
         data_4subscene= ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'V_sigma', 'nrcs_scat']
         data_subscene = [name + '_subscene' for name in data_4subscene]
 
-
-        data_lp = low_pass_filter_2D_dataset(self.data[data_4subscene], cutoff_frequency = 1/ (2*self.resolution_product), fill_nans=True) # FIXME why *2 ?
+        fs_x, fs_y = 1/self.grid_spacing, 1/self.stride
+        data_lp = low_pass_filter_2D_dataset(self.data[data_4subscene], 
+                                             cutoff_frequency = 1 / (self.resolution_product), 
+                                             fs_x=fs_x, 
+                                             fs_y=fs_y,
+                                             window=self.product_averaging_window,
+                                             fill_nans=True) # FIXME why *2 ?
         self.data[data_subscene] = data_lp
         # self.data[data_subscene] = self.data[data_4subscene].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
         return
@@ -1244,7 +1297,14 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
     scenes_to_average = ['wb_pulse_rg', 'V_wb_pulse_rg', 'dca_pulse_rg', 'doppler_w_dca_pulse_rg', 'V_dca_pulse_rg', 'V_doppler_w_dca_pulse_rg']
     scenes_averaged = [i+'_subscene' for i in scenes_to_average]
     # cls.data[scenes_averaged] = cls.data[scenes_to_average].rolling(grg=cls.grg_N, slow_time=cls.slow_time_N, center=True).mean()
-    data_lp = low_pass_filter_2D_dataset(cls.data[scenes_to_average], cutoff_frequency = 1/(2*cls.resolution_product), fill_nans=True) # FIXME why *2 ?
+
+    fs_x, fs_y = 1/cls.grid_spacing, 1/cls.stride
+    data_lp = low_pass_filter_2D_dataset(cls.data[scenes_to_average], 
+                                         cutoff_frequency = 1/(cls.resolution_product), 
+                                         fs_x=fs_x, 
+                                         fs_y=fs_y,
+                                         window=cls.product_averaging_window,
+                                         fill_nans=True) # FIXME why *2 ?
     cls.data[scenes_averaged] = data_lp
 
     # a bit of reschuffling of coordinates
