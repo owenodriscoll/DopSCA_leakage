@@ -268,10 +268,11 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fs_x: float, f
     # design time-domain filter
     filter_response = design_low_pass_filter_2D(da_spec.shape, cutoff_frequency, fs_x=fs_x, fs_y=fs_y, window=window)
 
-    # convert to fourier domain and multiply with spectrum (i.e. same as convolving filter with input image)
+    # convert window to fourier domain and multiply with spectrum, then convert back (i.e. same as convolving filter with input image)
     filter_response_fourier = np.fft.fft2(filter_response)
     da_spec_filt = da_spec * filter_response_fourier
-    
+    da_filt = xrft.ifft(da_spec_filt, shift = False) 
+
     if not return_complex:
         da_filt = da_filt.real
     if fill_nans:
