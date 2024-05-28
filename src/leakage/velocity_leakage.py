@@ -278,6 +278,12 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fs_x: float, f
     if fill_nans:
         da_filt = da_filt.where(condition_fill.data, np.nan)
 
+    # ensure dimensions after fft match those of input (sometimes rounding errors can occur)
+    # NOTE with shift set to False and no manual fftshift the coordinates appear incorrectly not to match (but is good, I hope)
+    dimensions = [*da.sizes]
+    for dimension in dimensions:
+        da_filt[dimension] = da[dimension]
+
     return da_filt
 
 def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fs_x: float, fs_y: float, window: str = 'hann', fill_nans: bool = False, return_complex: bool = False) -> xr.Dataset:
@@ -320,10 +326,8 @@ def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fs_x: fl
                                               ) for var in ds
         })
 
-    # ensure dimensions of fft match those of input (sometimes rounding errors can occur)
-    dimensions = [*ds.sizes]
-    for dimension in dimensions:
-        ds_filt[dimension] = ds[dimension]
+    
+
 
     return ds_filt
 
@@ -1299,7 +1303,8 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
     scenes_averaged = [i+'_subscene' for i in scenes_to_average]
     # cls.data[scenes_averaged] = cls.data[scenes_to_average].rolling(grg=cls.grg_N, slow_time=cls.slow_time_N, center=True).mean()
 
-    fs_x, fs_y = 1/cls.grid_spacing, 1/cls.stride
+    # NOTE here we confusing switch the definitions of fs_x and fs_y because the coordinates of loaded Doppler data follows a different order
+    fs_x, fs_y = 1/cls.stride, 1/cls.grid_spacing
     data_lp = low_pass_filter_2D_dataset(cls.data[scenes_to_average], 
                                          cutoff_frequency = 1/(cls.resolution_product), 
                                          fs_x=fs_x, 
