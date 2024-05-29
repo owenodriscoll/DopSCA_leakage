@@ -16,7 +16,7 @@ Clone environment
 
 `git clone git@github.com:owenodriscoll/DopSCA.git`
 
-Navigate to insatlled directory and pip install other requirements
+Navigate to installed directory and pip install other requirements
 
 `pip install -e .`
 
