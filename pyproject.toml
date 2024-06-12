@@ -8,7 +8,7 @@ description = "Python package for automated hyperparameter-optimization of commo
 readme = "README.md"
 requires-python = ">=3.11.0" #,<=3.12
 classifiers = [
-    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
 ]
