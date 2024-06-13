@@ -900,6 +900,8 @@ class S1DopplerLeakage:
 
         # prepare data by chunking and conversion to lower bit
         self.data = self.data.astype('float32').chunk('auto')
+
+        # this loop is an ugly way of sliding and subsetting along azimuth 
         for i, st in enumerate(idx_slow_time):
 
             a = self.data.isel(slow_time = st, az = idx_az[i])
@@ -992,11 +994,8 @@ class S1DopplerLeakage:
 
     def compute_leakage_velocity(self, add_pulse_pair_uncertainty = True):
         """
-        Computes Line of Sight (LoS) leakage Doppler and velocity considering the beam pattern, nrcs weighting and geometric Doppler
-        NOTE range-dependend gain compensation (weight_rg) returns overestimated signal at sidelobe nulls
+        Computes leakage Doppler and velocity considering the beam pattern, nrcs weighting and geometric Doppler
         NOTE assumes no squint and a flat Earth
-        NOTE computes LoS Dopplers
-        NOTE backscatter weight calculated per range line
 
         Parameters
         ----------
@@ -1008,6 +1007,7 @@ class S1DopplerLeakage:
         self.data['nrcs_weight'] = self.data['nrcs_scat_eqv'] / mean_along_azimuth(self.data['nrcs_scat_eqv'])#.mean(dim=['az_idx'])) 
         self.data['beam_weight'] = self.data['beam'] / mean_along_azimuth(self.data['beam'])#.mean(dim=['az_idx'])) 
         self.data['elevation_angle'] = np.radians(self.data['inc_scatt_eqv']) # NOTE assumes flat Earth
+        self.data['elevation_angle_scat'] = mean_along_azimuth(np.radians(self.data['inc_scatt_eqv_cube']))
 
         self.data['dop_geom'] = vel2dop(
             velocity=self.vx_sat,
@@ -1024,7 +1024,7 @@ class S1DopplerLeakage:
             Doppler=self.data['dop_beam_weighted'],
             Lambda=self.Lambda,
             angle_incidence=self.data['elevation_angle'],
-            angle_azimuth= np.pi/2, # the geometric doppler is interpreted as LoS motion, so azimuth angle component must result in value of 1 (i.e. pi/2)
+            angle_azimuth= np.pi/2, # the geometric doppler is interpreted as radial motion, so azimuth angle component must result in value of 1 (i.e. pi/2)
             degrees=False,
         )
         
@@ -1034,10 +1034,6 @@ class S1DopplerLeakage:
         # sum over azimuth to receive range-slow_time results
         self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = mean_along_azimuth(self.data[['dop_beam_weighted', 'V_leakage']])
         
-        # add attribute
-        self.data['V_leakage_pulse_rg'] = self.data['V_leakage_pulse_rg'].assign_attrs(units= 'm/s', description = 'Line of Sight velocity ')
-        self.data['doppler_pulse_rg'] = self.data['doppler_pulse_rg'].assign_attrs(units= 'Hz', description = 'Line of Sight Doppler frequency ')
-
         # add pulse pair velocity uncertainty
         if (self._pulsepair_noise) & (add_pulse_pair_uncertainty):
             wavenumber = 2 * np.pi / self.Lambda
@@ -1098,7 +1094,7 @@ class S1DopplerLeakage:
         V_pp = V_pp_c[:shape_ref[0], :shape_ref[1]]
         self.V_pp_c = V_pp_c
 
-        self.data['V_pp'] = xr.zeros_like(self.data['V_leakage_pulse_rg']) + V_pp.data
+        self.data['V_pp'] = (xr.zeros_like(self.data['V_leakage_pulse_rg']) + V_pp.data) / np.sin(self.data['elevation_angle_scat'])
         self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp'].real # complex part should be negligible
 
         # ------- re-interpolate to higher sampling to maintain uniform ground samples -------
@@ -1177,7 +1173,7 @@ class S1DopplerLeakage:
         # interpolate estimated scatterometer data back to S1 grid size
         slow_time_upsamp = np.linspace(self.data.slow_time[0], self.data.slow_time[-1], idx_end - idx_start) 
         nrcs_scat_upsamp = nrcs_scat_speckle.T.interp(slow_time = slow_time_upsamp)
-        inc_scat_upsamp = mean_along_azimuth(self.data.inc_scatt_eqv_cube).T.interp(slow_time = slow_time_upsamp)
+        inc_scat_upsamp = np.degrees(self.data['elevation_angle_scat']).T.interp(slow_time = slow_time_upsamp)
 
         # apply cropping 
         new_nrcs[idx_start: idx_end, :] = nrcs_scat_upsamp
@@ -1270,7 +1266,7 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
             Doppler=cls.data[['dca', 'wb']],
             Lambda=cls.Lambda,
             angle_incidence=cls.data['inc_scatt_eqv'],
-            angle_azimuth= 90, # the geometric doppler is interpreted as LoS motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
+            angle_azimuth= 90, # the geometric doppler is interpreted as radial motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
             degrees=True,
         )
     cls.data[['V_dca_pulse_rg', 'V_wb_pulse_rg']] = mean_along_azimuth(cls.data[['V_dca', 'V_wb']])
@@ -1279,7 +1275,7 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
             Doppler=cls.data['doppler_w_dca'],
             Lambda=cls.Lambda,
             angle_incidence=cls.data['inc_scatt_eqv'],
-            angle_azimuth= 90, # the geometric doppler is interpreted as LoS motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
+            angle_azimuth= 90, # the geometric doppler is interpreted as radial motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
             degrees=True,
         )
 
