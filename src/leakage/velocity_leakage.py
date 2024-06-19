@@ -1004,8 +1004,9 @@ class S1DopplerLeakage:
         """
 
         # compute geometrical doppler, beam pattern and nrcs weigths
-        self.data['nrcs_weight'] = self.data['nrcs_scat_eqv'] / mean_along_azimuth(self.data['nrcs_scat_eqv'])#.mean(dim=['az_idx'])) 
+        # self.data['nrcs_weight'] = self.data['nrcs_scat_eqv'] / mean_along_azimuth(self.data['nrcs_scat_eqv'])#.mean(dim=['az_idx'])) 
         self.data['beam_weight'] = self.data['beam'] / mean_along_azimuth(self.data['beam'])#.mean(dim=['az_idx'])) 
+        self.data['weight'] = (self.data['beam'] * self.data['nrcs_scat_eqv']) / mean_along_azimuth(self.data['beam'] * self.data['nrcs_scat_eqv'])
         self.data['elevation_angle'] = np.radians(self.data['inc_scatt_eqv']) # NOTE assumes flat Earth
         self.data['elevation_angle_scat'] = mean_along_azimuth(np.radians(self.data['inc_scatt_eqv_cube']))
 
@@ -1017,7 +1018,7 @@ class S1DopplerLeakage:
             degrees=False,
         ) 
 
-        self.data['dop_beam_weighted'] = self.data['dop_geom'] * self.data['beam_weight'] * self.data['nrcs_weight']
+        self.data['dop_beam_weighted'] = self.data['dop_geom'] * self.data['weight']# self.data['beam_weight'] * self.data['nrcs_weight']
 
         # beam and backscatter weighted geometric Doppler is interpreted as geophysical Doppler, i.e. Leakage
         self.data['V_leakage'] = dop2vel(
@@ -1255,9 +1256,9 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
     obj_copy.data['dca_scatt'] = obj_copy.data['dca_s1'] * reprojection_factor
     obj_copy.data['wb_scatt'] = obj_copy.data['wb_s1'] * reprojection_factor
     
-    cls.data[['dca', 'wb']] = obj_copy.data[['dca_scatt', 'wb_scatt']] * cls.data['beam_weight'] * cls.data['nrcs_weight']
+    cls.data[['dca', 'wb']] = obj_copy.data[['dca_scatt', 'wb_scatt']] * cls.data['weight'] # cls.data['beam_weight'] * cls.data['nrcs_weight']
     cls.data[['dca_pulse_rg', 'wb_pulse_rg']] = mean_along_azimuth(cls.data[['dca', 'wb']] )
-    cls.data['doppler_w_dca'] =  (obj_copy.data['dca_scatt'] + cls.data['dop_geom']) * cls.data['beam_weight'] * cls.data['nrcs_weight']
+    cls.data['doppler_w_dca'] =  (obj_copy.data['dca_scatt'] + cls.data['dop_geom']) * cls.data['weight'] #cls.data['beam_weight'] * cls.data['nrcs_weight']
     cls.data['doppler_w_dca_pulse_rg'] = mean_along_azimuth(cls.data['doppler_w_dca'])
     
     cls.data = cls.data.astype('float32')
