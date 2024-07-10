@@ -976,13 +976,13 @@ class S1DopplerLeakage:
         
         # Assumes same patter on transmit and receive
         if self.beam_pattern == "sinc":
-            beam_az = sinc_bp(sin_angle=self.data.az_angle_wrt_boresight, L = self.antenna_length, f0 = self.f0)
+            beam_az = sinc_bp(sin_angle=np.sin(self.data.az_angle_wrt_boresight), L = self.antenna_length, f0 = self.f0)
             beam_az_two_way = beam_az**2
         elif self.beam_pattern == "phased_array":
-            beam_az = phased_array(sin_angle=self.data.az_angle_wrt_boresight, L = self.antenna_length, f0 = self.f0, N = N, w = w).squeeze()
+            beam_az = phased_array(sin_angle=np.sin(self.data.az_angle_wrt_boresight), L = self.antenna_length, f0 = self.f0, N = N, w = w).squeeze()
             beam_az_two_way = beam_az**2 
         
-        beam_grg = sinc_bp(sin_angle=self.data.grg_angle_wrt_boresight, L = self.antenna_height, f0 = self.f0)
+        beam_grg = sinc_bp(sin_angle=np.sin(self.data.grg_angle_wrt_boresight), L = self.antenna_height, f0 = self.f0)
         beam_grg_two_way = beam_grg**2
         
         beam = beam_az_two_way * beam_grg_two_way
