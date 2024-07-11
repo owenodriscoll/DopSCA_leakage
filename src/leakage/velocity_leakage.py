@@ -39,19 +39,17 @@ from typing import Callable, Union, List, Dict, Any
 
 # NOTE Calculations assume 
     # NOTE a rectilinear geometry
-    # NOTE perfect right-looking radar with no pitch, yaw and roll
+    # NOTE perfect right-looking radar with no pitch, yaw and roll, no squint assumed in 
+        # NOTE beam mask construction
+        # NOTE velocity variance calculation from coherence loss
+        # NOTE slant to ground range
     # NOTE range cell migration already corrected for
     # NOTE neglecting any Earth-rotation effects. 
     # NOTE same beam pattern on transmit and receive
-    # NOTE two nrcs observations per estiamte such that speckle is reduced by sqrt(2)
-# NOTE Assumes square Sentinel-1 pixels. The following processes rely on square pixels
-    # NOTE ERA5 data is resampled to Sentinel-1 grid size and then smoothed
-    # NOTE calculation of az_mask_pixels_cutoff
-# NOTE currently number of antenna elements in azimuth and range are considered equal
-# NOTE Assumes no squint in:
-    # NOTE beam mask construction
-    # NOTE velocity variance calculation from coherence loss
-    # NOTE slant to ground range
+    # NOTE Assumes square Sentinel-1 pixels. The following processes rely on square pixels
+        # NOTE ERA5 data is resampled to Sentinel-1 grid size and then smoothed
+        # NOTE calculation of az_mask_pixels_cutoff
+    # NOTE number of antenna elements in azimuth and range are considered equal
 
 
 # constants
@@ -413,6 +411,8 @@ class S1DopplerLeakage:
         along-azimuthal velocity of satellite, in meters per second
     PRF: int
         pulse repetition frequency
+    SNR: float
+        Signal to Noise Ratio for calculation of velocity variance. Because SNR is dominated by signal to clutter for pulse pair in DopSCA, SNR is approx 1 on average
     az_footprint_cutoff: int
         along azimuth beam footprint to consider per pulse (outside is clipped off), in meters
     grid_spacing: int
@@ -466,6 +466,7 @@ class S1DopplerLeakage:
     boresight_elevation_angle_scat: float = 40                          # ?
     vx_sat: int = 6800                                                  # Hoogeboom et al,. (2018)
     PRF: int = 4                                                        # PRF per antenna, total PRF is 32 Hz for 6 antennas, Hoogeboom et al,. (2018)
+    SNR: float = 1.0                                                    # Signal to noise ratio, for Pulse Pair is approx 1 on average
     az_footprint_cutoff: int = 80_000                                   # custom
     grid_spacing: int = 75                                              # assuming 150 m ground range resolution, Hoogeboom et al,. (2018)
     resolution_product: int = 25_000                                    # Hoogeboom et al,. (2018)
@@ -479,6 +480,7 @@ class S1DopplerLeakage:
     _pulsepair_noise: bool = True
     _speckle_noise: bool = True
     _interpolator: str = 'linear'
+    _gamma_hardcode: Union[types.NoneType, float] = None
 
 
     def __post_init__(self):
@@ -511,7 +513,7 @@ class S1DopplerLeakage:
         return np.exp(-(tau/T)**2) # 
 
     @staticmethod
-    def pulse_pair_sigma_v(T_pp, T_corr_surface, T_corr_Doppler, SNR, Lambda, N_L = 1):
+    def pulse_pair_sigma_v(T_pp, T_corr_surface, T_corr_Doppler, SNR, Lambda, N_L = 1, gamma = None):
         """
         Calculates the Pulse pair velocity standard deviation within a resolution cell due to coherence loss
 
@@ -531,6 +533,8 @@ class S1DopplerLeakage:
             Wavelength of considered radiowave
         N_L : int
             Number of independent looks for given area
+        gamma : scaler
+            coherence in case it should be hard coded
 
         Returns
         -------
@@ -543,7 +547,8 @@ class S1DopplerLeakage:
         gamma_temporal = S1DopplerLeakage.decorrelation(T_pp, T_corr_surface)
         gamma_SNR = SNR / (1 + SNR)
 
-        gamma = gamma_temporal * gamma_SNR * gamma_velocity
+        if type(gamma) == type(None):
+            gamma = gamma_temporal * gamma_SNR * gamma_velocity
         
         variance = (1 / (2*wavenumber*T_pp))**2 / (2*N_L) * (1-gamma**2)/gamma**2 # eq 14 Rodriguez (2018)
 
@@ -557,7 +562,7 @@ class S1DopplerLeakage:
         """
 
         attrs_to_str = ['start_date', 'stop_date', 'footprint', 'multidataset']
-        vars_to_keep = ['ground_heading', 'time', 'incidence', 'latitude', 'longitude', 'sigma0']
+        vars_to_keep = ['ground_heading', 'time', 'incidence', 'latitude', 'longitude', 'sigma0', 'ground_range_approx']
         coords_to_drop = "spatial_ref"
         pol = "VV"
 
@@ -586,6 +591,14 @@ class S1DopplerLeakage:
             """
             id_start = filename.rfind('_') + 1 
             return filename[id_start:id_start+unique_id_length]
+        
+        def compute_S1_ground_range(ds: xr.Dataset, c = 3E8) -> xr.DataArray:
+            """"
+            Computes approximate ground range corresponding to elevation angle and slant range travel time
+            """
+            slant_range_distance = (ds.slant_range_time * c) / 2
+            ground_range_approx = np.sin(np.deg2rad(ds.elevation)) * slant_range_distance
+            return ground_range_approx
 
 
         def open_new_file(filename, grid_spacing):
@@ -654,6 +667,9 @@ class S1DopplerLeakage:
 
             # keep only VV polarisation
             self.S1_file = self.S1_file.sel(pol = pol)
+
+            # compute approximate ground range
+            self.S1_file['ground_range_approx'] = compute_S1_ground_range(ds = self.S1_file, c = c)
 
             # store as .nc file ...
             self.S1_file[vars_to_keep].to_netcdf(storage_name)
@@ -1048,15 +1064,15 @@ class S1DopplerLeakage:
             T_pp = 1.15E-4 # intra pulse-pair pulse separation time, Hoogeboom et al., (2018)
             U = 6 # Average wind speed assumed of 6 m/s
             T_corr_surface = 3.29 * self.Lambda / U # Decorrelation time of surface at radio frequency of interest (below eq. 19 Theodosious et al., 2023)
-            SNR = 1 # because SNR is dominated by signal to clutter, which for Pulse Pair is approx 1 on average
 
             # NOTE assumes no squint
             self.velocity_error, self.gamma = self.pulse_pair_sigma_v(
                 T_pp = T_pp, 
                 T_corr_surface = T_corr_surface, 
                 T_corr_Doppler = T_corr_Doppler, 
-                SNR = SNR,  
-                Lambda = self.Lambda)
+                SNR = self.SNR, 
+                Lambda = self.Lambda,
+                gamma = self._gamma_hardcode)
 
         else:
             self.velocity_error = 0
@@ -1205,7 +1221,7 @@ class S1DopplerLeakage:
 
     def apply(self, 
               data_to_return: list[str] = 
-                                ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 'V_sigma', 'V_sigma_subscene',
+                                ['az', 'doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 'V_sigma', 'V_sigma_subscene',
                                  'doppler_pulse_rg_subscene', 'doppler_pulse_rg_subscene_inverted',
                                  'V_leakage_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene_inverted',
                                  'nrcs_scat_subscene', 'doppler_pulse_rg_inverted',
