@@ -6,6 +6,7 @@ ML_analyses
 *scatt4ML.nc
 *catboost_info
 *.nc
+*.csv
 data_processed
 *.egg-info
 .vscode

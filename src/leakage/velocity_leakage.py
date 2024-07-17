@@ -50,6 +50,7 @@ from typing import Callable, Union, List, Dict, Any
         # NOTE ERA5 data is resampled to Sentinel-1 grid size and then smoothed
         # NOTE calculation of az_mask_pixels_cutoff
     # NOTE number of antenna elements in azimuth and range are considered equal
+    # NOTE pulse pair noise assumes a pair of pulses, not any other combination
 
 
 # constants
@@ -413,6 +414,8 @@ class S1DopplerLeakage:
         pulse repetition frequency
     SNR: float
         Signal to Noise Ratio for calculation of velocity variance. Because SNR is dominated by signal to clutter for pulse pair in DopSCA, SNR is approx 1 on average
+    T_pp: float
+        Separation time (in seconds) between pulses of pulse_pair
     az_footprint_cutoff: int
         along azimuth beam footprint to consider per pulse (outside is clipped off), in meters
     grid_spacing: int
@@ -467,6 +470,7 @@ class S1DopplerLeakage:
     vx_sat: int = 6800                                                  # Hoogeboom et al,. (2018)
     PRF: int = 4                                                        # PRF per antenna, total PRF is 32 Hz for 6 antennas, Hoogeboom et al,. (2018)
     SNR: float = 1.0                                                    # Signal to noise ratio, for Pulse Pair is approx 1 on average
+    T_pp: float = 1.15E-4                                               # pulse-pair separation time 
     az_footprint_cutoff: int = 80_000                                   # custom
     grid_spacing: int = 75                                              # assuming 150 m ground range resolution, Hoogeboom et al,. (2018)
     resolution_product: int = 25_000                                    # Hoogeboom et al,. (2018)
@@ -1061,7 +1065,7 @@ class S1DopplerLeakage:
             sigma_az_angle = beam_3dB.std(dim = 'az_idx').mean().values*1
 
             T_corr_Doppler = 1 / (np.sqrt(2) * wavenumber * self.vx_sat * sigma_az_angle) # equation 7 from Rodriguez et al., (2018)
-            T_pp = 1.15E-4 # intra pulse-pair pulse separation time, Hoogeboom et al., (2018)
+            T_pp = self.T_pp # intra pulse-pair pulse separation time, Hoogeboom et al., (2018)
             U = 6 # Average wind speed assumed of 6 m/s
             T_corr_surface = 3.29 * self.Lambda / U # Decorrelation time of surface at radio frequency of interest (below eq. 19 Theodosious et al., 2023)
 
