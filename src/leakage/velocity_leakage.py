@@ -8,10 +8,12 @@ import dask  # implicitely loaded
 import copy
 import pyproj
 import xrft
+import random
 import bottleneck # implicitely loaded somewhere
 import numpy as np
 import xarray as xr
 import dask.array as da
+from scipy import stats
 from scipy.signal import firwin
 from stereoid.oceans.GMF.cmod5n import cmod5n_inverse, cmod5n_forward
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
@@ -56,8 +58,55 @@ from typing import Callable, Union, List, Dict, Any
 # constants
 c = 3E8
 
+def convert_to_0_360(longitude):
+    return (longitude + 360) % 360
 
-def mean_along_azimuth(x:xr.DataArray|xr.Dataset, azimuth_dim: str = 'az_idx', skipna: bool = False) -> xr.DataArray | xr.Dataset:
+def decorrelation(tau, T):
+    return np.exp(-(tau/T)**2) # 
+
+def pulse_pair_sigma_v_rodriguez2018(T_pp, T_corr_surface, T_corr_Doppler, SNR, Lambda, N_L = 1, gamma = None):
+    """
+    Calculates the Pulse pair velocity standard deviation within a resolution cell due to coherence loss
+
+    NOTE assumes broadside geometry (non-squinted)
+
+    Parameters
+    ----------
+    T_pp : scaler
+        Intra pulse pair time separation
+    T_corr_surface : scaler
+        Decorrelation time of ocean surface at scales of radio wavelength of interest
+    T_corr_Doppler : scaler
+        Decorrelation time of velocities within resolution cell as a result of satellite motion during pulse-pair transmit
+    SNR : scaler
+        Signal to Noise ratio (for pulse-pair system we assume signal to clutter ratio of 1 dominates)
+    Lambda : scaler
+        Wavelength of considered radiowave
+    N_L : int
+        Number of independent looks for given area
+    gamma : scaler
+        coherence in case it should be hard coded
+
+    Returns
+    -------
+    Scaler of estimates surface velocity standard deviation
+
+    """
+    wavenumber = 2 * np.pi / Lambda 
+
+    gamma_velocity = decorrelation(T_pp, T_corr_Doppler) # eq 6 & 7 Rodriguez (2018), NOTE not valid for squint NOTE assumes Gaussian beam pattern
+    gamma_temporal = decorrelation(T_pp, T_corr_surface)
+    gamma_SNR = SNR / (1 + SNR)
+
+    if type(gamma) == type(None):
+        gamma = gamma_temporal * gamma_SNR * gamma_velocity
+    
+    variance = (1 / (2*wavenumber*T_pp))**2 / (2*N_L) * (1-gamma**2)/gamma**2 # eq 14 Rodriguez (2018)
+
+    return np.sqrt(variance), gamma
+
+
+def mean_along_azimuth(x: xr.DataArray | xr.Dataset, azimuth_dim: str = 'az_idx', skipna: bool = False) -> xr.DataArray | xr.Dataset:
     """
     integrates input array/dataset along azimuthal beam pattern
 
@@ -221,7 +270,7 @@ def design_low_pass_filter_2D(da_shape: tuple[int, int], cutoff_frequency: float
 
 def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fs_x: float, fs_y: float, window: str = 'hann', fill_nans: bool = False, return_complex: bool = False) -> xr.DataArray:
     """
-    Low pass filtering am xarray dataset in the Fourier domain using xrft, scipy.signal.windows and np.fft
+    Low pass filtering an xarray dataArray in the Fourier domain using xrft, scipy.signal.windows and np.fft
 
     Assumes both x and y have same dimensions
 
@@ -284,7 +333,7 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fs_x: float, f
 
 def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fs_x: float, fs_y: float, window: str = 'hann', fill_nans: bool = False, return_complex: bool = False) -> xr.Dataset:
     """
-    Wrapper of low_pass_filter_2D for each array in dataset
+    Wrapper of low_pass_filter_2D for each dataArray in dataset
 
     Assumes both x and y have same dimensions
 
@@ -382,6 +431,44 @@ def compute_padding_1D(length_desired: int, length_current: int) -> tuple[int, i
     pad_total = length_desired - length_current
     pad = int(np.ceil(pad_total/2))
     return pad
+
+def phase_error_gen(coherence, n_samples: Union[int, tuple], theta: float = 0,  n_bins: int = 20001, random_state: Union[float, int, types.NoneType]= None):
+    """
+    1-Look phase-difference probability density function (pdf) from equation 19 in:
+    Jong-Sen Lee et al., (1994) "Statistics of phase difference and product magnitude of multi-look processed Gaussian signals"
+    
+    Input
+    -----
+    coherence: float,
+        coherence of phase difference
+    n_samples: Union[int, tuple], 
+        Number of samples to generate given as a number or as a shape within a tuple
+    theta: float,
+        phase offset, in radian
+    n_bins: int,
+        Number of discrete bins to generate pdf
+    random_state: Union[int, float, types.NoneType],
+        Fixes random state if float or int is provided
+    """
+
+    if type(random_state) is not type(None):
+        random.seed(random_state)
+
+    if type(n_samples) == tuple:
+        target_shape = n_samples
+        N = np.prod(target_shape)
+    else:
+        N = n_samples
+
+    psi = np.linspace(-np.pi, np.pi, n_bins)
+    beta = coherence * np.cos(psi - theta)
+    pdf = ((1 - coherence**2) * (np.sqrt(1 - beta**2) + beta * (np.pi-(np.arccos(beta))))) / (2 * np.pi * (1 - beta**2)**(1.5))
+    samples = np.array(random.choices(population=psi, weights=pdf, k=N))
+
+    if type(n_samples) == tuple:
+        samples = samples.reshape(target_shape)
+
+    return samples
 
 @dataclass
 class S1DopplerLeakage:
@@ -508,58 +595,6 @@ class S1DopplerLeakage:
         if self.stride % self.grid_spacing != 0:
             warnings.warn("Combination of vx_sat, PRF and grid_spacing may lead to aliasing: (vx_sat / PRF) % grid_spacing != 0")
 
-    @staticmethod
-    def convert_to_0_360(longitude):
-        return (longitude + 360) % 360
-
-    @staticmethod
-    def decorrelation(tau, T):
-        return np.exp(-(tau/T)**2) # 
-
-    @staticmethod
-    def pulse_pair_sigma_v(T_pp, T_corr_surface, T_corr_Doppler, SNR, Lambda, N_L = 1, gamma = None):
-        """
-        Calculates the Pulse pair velocity standard deviation within a resolution cell due to coherence loss
-
-        NOTE assumes broadside geometry (non-squinted)
-
-        Parameters
-        ----------
-        T_pp : scaler
-            Intra pulse pair time separation
-        T_corr_surface : scaler
-            Decorrelation time of ocean surface at scales of radio wavelength of interest
-        T_corr_Doppler : scaler
-            Decorrelation time of velocities within resolution cell as a result of satellite motion during pulse-pair transmit
-        SNR : scaler
-            Signal to Noise ratio (for pulse-pair system we assume signal to clutter ratio of 1 dominates)
-        Lambda : scaler
-            Wavelength of considered radiowave
-        N_L : int
-            Number of independent looks for given area
-        gamma : scaler
-            coherence in case it should be hard coded
-
-        Returns
-        -------
-        Scaler of estimates surface velocity standard deviation
-
-        """
-        wavenumber = 2 * np.pi / Lambda 
-
-        gamma_velocity = S1DopplerLeakage.decorrelation(T_pp, T_corr_Doppler) # eq 6 & 7 Rodriguez (2018), NOTE not valid for squint NOTE assumes Gaussian beam pattern
-        gamma_temporal = S1DopplerLeakage.decorrelation(T_pp, T_corr_surface)
-        gamma_SNR = SNR / (1 + SNR)
-
-        if type(gamma) == type(None):
-            gamma = gamma_temporal * gamma_SNR * gamma_velocity
-        
-        variance = (1 / (2*wavenumber*T_pp))**2 / (2*N_L) * (1-gamma**2)/gamma**2 # eq 14 Rodriguez (2018)
-
-        return np.sqrt(variance), gamma
-
-
-    # TODO add chunking
     def open_data(self):
         """
         Open data from a file or a list of files. First check if file can be reloaded
@@ -715,7 +750,7 @@ class S1DopplerLeakage:
         latmean, lonmean = latitudes.mean().values*1, longitudes.mean().values*1
         latmin, latmax = latitudes.min().values*1, latitudes.max().values*1
         lonmin, lonmax = longitudes.min().values*1, longitudes.max().values*1
-        lonmin, lonmax = [self.convert_to_0_360(i) for i in [lonmin, lonmax]] # NOTE correction for fact that ERA5 goes between 0 - 360
+        lonmin, lonmax = [convert_to_0_360(i) for i in [lonmin, lonmax]] # NOTE correction for fact that ERA5 goes between 0 - 360
 
         if type(self.era5_file) == str:
             era5 = xr.open_dataset(self.era5_file)
@@ -752,7 +787,7 @@ class S1DopplerLeakage:
             method = 'nearest')
 
         era5_subset = era5_subset_time.sel(
-            longitude = self.convert_to_0_360(self.S1_file[var_lon]),
+            longitude = convert_to_0_360(self.S1_file[var_lon]),
             latitude = self.S1_file[var_lat],
             method = 'nearest')
 
@@ -1054,32 +1089,6 @@ class S1DopplerLeakage:
         
         # sum over azimuth to receive range-slow_time results
         self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = mean_along_azimuth(self.data[['dop_beam_weighted', 'V_leakage']])
-        
-        # add pulse pair velocity uncertainty
-        if (self._pulsepair_noise) & (add_pulse_pair_uncertainty):
-            wavenumber = 2 * np.pi / self.Lambda
-
-            # -- calculates average azimuthal beam standard deviation within -3 dB 
-            beam_db = 10 * np.log10(self.data.beam)
-            beam_3dB = xr.where((beam_db- beam_db.max(dim = 'az_idx'))< -3, np.nan, 1)*self.data.az_angle_wrt_boresight
-            sigma_az_angle = beam_3dB.std(dim = 'az_idx').mean().values*1
-
-            T_corr_Doppler = 1 / (np.sqrt(2) * wavenumber * self.vx_sat * sigma_az_angle) # equation 7 from Rodriguez et al., (2018)
-            T_pp = self.T_pp # intra pulse-pair pulse separation time, Hoogeboom et al., (2018)
-            U = 6 # Average wind speed assumed of 6 m/s
-            T_corr_surface = 3.29 * self.Lambda / U # Decorrelation time of surface at radio frequency of interest (below eq. 19 Theodosious et al., 2023)
-
-            # NOTE assumes no squint
-            self.velocity_error, self.gamma = self.pulse_pair_sigma_v(
-                T_pp = T_pp, 
-                T_corr_surface = T_corr_surface, 
-                T_corr_Doppler = T_corr_Doppler, 
-                SNR = self.SNR, 
-                Lambda = self.Lambda,
-                gamma = self._gamma_hardcode)
-
-        else:
-            self.velocity_error = 0
             
         # compute approximate ground range spatial resolution of scatterometer (slant range resolution =/= ground range resolution)
         grg_for_safekeeping = self.data.grg
@@ -1102,9 +1111,39 @@ class S1DopplerLeakage:
         shape_ref = self.data[reference].shape
 
         # assumes data along resample dim is oversampled by a factor 2, such that there are two samples per independent sample resolution
-        da_ones_independent = da_ones_independent_samples(self.data[reference], dim_to_resample= 0, samples_per_indepent_sample=2)
-        V_pp = self.velocity_error * np.random.randn(*da_ones_independent.shape)
-        da_V_pp = V_pp * da_ones_independent
+        da_ones_independent = da_ones_independent_samples(self.data[reference], dim_to_resample=0, samples_per_indepent_sample=2)
+
+        # add pulse pair velocity uncertainty
+        if (self._pulsepair_noise) & (add_pulse_pair_uncertainty):
+            wavenumber = 2 * np.pi / self.Lambda
+
+            # -- calculates average azimuthal beam standard deviation within -3 dB 
+            beam_db = 10 * np.log10(self.data.beam)
+            beam_3dB = xr.where((beam_db- beam_db.max(dim = 'az_idx'))< -3, np.nan, 1)*self.data.az_angle_wrt_boresight
+            sigma_az_angle = beam_3dB.std(dim = 'az_idx').mean().values*1
+
+            T_corr_Doppler = 1 / (np.sqrt(2) * wavenumber * self.vx_sat * sigma_az_angle) # equation 7 from Rodriguez et al., (2018)
+            T_pp = self.T_pp # intra pulse-pair pulse separation time, Hoogeboom et al., (2018)
+            U = 6 # Average wind speed assumed of 6 m/s
+            T_corr_surface = 3.29 * self.Lambda / U # Decorrelation time of surface at radio frequency of interest (below eq. 19 Theodosious et al., 2023)
+
+            # NOTE assumes no squint
+            # NOTE we do not use this velocity error instead, we calculate that using phase uncerttainties from Lee et al. 1994
+            _, self.gamma = pulse_pair_sigma_v_rodriguez2018(
+                T_pp = T_pp, 
+                T_corr_surface = T_corr_surface, 
+                T_corr_Doppler = T_corr_Doppler, 
+                SNR = self.SNR, 
+                Lambda = self.Lambda,
+                gamma = self._gamma_hardcode)
+            
+            phase_uncertainty = phase_error_gen(coherence = self.gamma, n_samples=(da_ones_independent.shape), random_state=self.random_state)
+            self.velocity_error = phase_uncertainty / 2 / wavenumber / self.T_pp 
+
+        else:
+            self.velocity_error = 0
+
+        da_V_pp = self.velocity_error * da_ones_independent
 
         pad = compute_padding_1D(length_desired=self.data[reference].sizes[dim_interp], length_current=da_V_pp.sizes['dim_0'])
         
@@ -1116,7 +1155,7 @@ class S1DopplerLeakage:
         self.V_pp_c = V_pp_c
 
         self.data['V_pp'] = (xr.zeros_like(self.data['V_leakage_pulse_rg']) + V_pp.data) / np.sin(self.data['elevation_angle_scat'])
-        self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp'].real # complex part should be negligible
+        self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp'].real # complex part should be negligible anyways
 
         # ------- re-interpolate to higher sampling to maintain uniform ground samples -------
         self.data = self.data.interp(grg=grg_for_safekeeping, method=self._interpolator)
