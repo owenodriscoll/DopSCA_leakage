@@ -29,8 +29,15 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
+    - name: Add conda to system path
+      run: |
+            # $CONDA is an environment variable pointing to the root of the miniconda directory
+            echo $CONDA/bin >> $GITHUB_PATH
+    - name: Install gdal
+      run: |
+            conda install gdal
+
     - name: Install Python dependencies
       run: |
-        python3 -m pip install --upgrade pip
-        conda install gdal
-        python3 -m pip install .
+            python3 -m pip install --upgrade pip
+            python3 -m pip install .
