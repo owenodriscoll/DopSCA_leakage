@@ -25,3 +25,7 @@ jobs:
       - name: Install GDAL
         run: |
           conda install gdal
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -e .
