@@ -24,7 +24,7 @@ jobs:
         shell: pwsh
         run: conda list
       - name: init conda
-        shell: bash
+        shell: bash -el {0}
         run: |
           conda init bash
       - name: Install GDAL
