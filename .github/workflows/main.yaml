@@ -25,6 +25,7 @@ jobs:
         run: conda list
       - name: Install GDAL
         run: |
+          conda activate test
           conda install gdal
       - name: Install Python dependencies
         run: |
