@@ -28,9 +28,8 @@ jobs:
         run: |
           conda init bash
       - name: Install GDAL
-        shell: bash
+        shell: bash -el {0}
         run: |
-          conda activate test
           conda install gdal
           python3 -m pip install --upgrade pip
           python3 -m pip install -e .
