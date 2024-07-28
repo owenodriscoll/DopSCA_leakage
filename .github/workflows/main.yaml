@@ -30,6 +30,6 @@ jobs:
       - name: Install GDAL
         shell: bash -el {0}
         run: |
-          conda install -c conda-forge gdal
+          conda install -c conda-forge gdal==3.6.2
           python3 -m pip install --upgrade pip
           python3 -m pip install -e .
