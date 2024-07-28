@@ -26,7 +26,7 @@ jobs:
       - name: Install GDAL
         shell: bash
         run: |
-          conda init
+          conda init bash
           source ~/.bashrc
           conda activate test
           conda install gdal
