@@ -30,7 +30,6 @@ jobs:
       - name: Install GDAL
         shell: bash
         run: |
-          source ~/.bashrc
           conda activate test
           conda install gdal
           python3 -m pip install --upgrade pip
