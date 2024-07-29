@@ -15,7 +15,7 @@ classifiers = [
 
 
 dependencies = [
-  "xsar[S1] == 2024.2.*",
+  "xsar[S1] == 2024.4.*",
   "dask",
   "xarray",
   "drama",
