@@ -1,10 +1,9 @@
-name: Python Package using Conda
+name: CI
 
-on: [push]
+on: [push, pull_request]
 
 jobs:
-  example-1:
-    name: Ex1 (${{ matrix.python-version }}, ${{ matrix.os }})
+  build:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -12,22 +11,63 @@ jobs:
         os: ["windows-latest"]
         # os: ["ubuntu-latest", "macos-latest", "windows-latest"]
         python-version: ["3.11"]
+    
     steps:
-      - uses: actions/checkout@v2
-      - uses: conda-incubator/setup-miniconda@v3
-        with:
-          activate-environment: test
-          auto-update-conda: true
-          python-version: ${{ matrix.python-version }}
-          auto-activate-base: false
-      - name: Conda info
-        shell: bash -el {0}
-        run: |
-          conda info
-          conda list
-      - name: Install packages
-        shell: bash -el {0}
-        run: |
-          conda install -c conda-forge gdal==3.6.2
-          python3 -m pip install --upgrade pip
-          python3 -m pip install -e .
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Miniconda
+      uses: conda-incubator/setup-miniconda@v2
+      with:
+        activate-environment: myenv
+        python-version: ${{ matrix.python-version }}  # Specify the Python version
+        auto-update-conda: true
+        auto-activate-base: false
+
+    - name: Create conda environment
+      run: conda create --name myenv python=${{ matrix.python-version }}
+
+    - name: Activate conda environment
+      run: source activate myenv
+
+    - name: Install dependencies with conda
+      run: conda install gdal
+
+    - name: Install dependencies with pip
+      run: pip install xsar 
+
+
+
+# name: Python Package using Conda
+
+# on: [push]
+
+# jobs:
+#   example-1:
+#     name: Ex1 (${{ matrix.python-version }}, ${{ matrix.os }})
+#     runs-on: ${{ matrix.os }}
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         os: ["windows-latest"]
+#         # os: ["ubuntu-latest", "macos-latest", "windows-latest"]
+#         python-version: ["3.11"]
+#     steps:
+#       - uses: actions/checkout@v2
+#       - uses: conda-incubator/setup-miniconda@v3
+#         with:
+#           activate-environment: test
+#           auto-update-conda: true
+#           python-version: ${{ matrix.python-version }}
+#           auto-activate-base: false
+#       - name: Conda info
+#         shell: bash -el {0}
+#         run: |
+#           conda info
+#           conda list
+#       - name: Install packages
+#         shell: bash -el {0}
+#         run: |
+#           conda install -c conda-forge gdal==3.6.2
+#           python3 -m pip install --upgrade pip
+#           python3 -m pip install -e .
