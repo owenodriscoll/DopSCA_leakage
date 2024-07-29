@@ -28,17 +28,6 @@ jobs:
       shell: bash -el {0}
       run: conda create --name myenv python=${{ matrix.python-version }}
 
-    - name: Activate conda environment
-      if: runner.os != 'Windows'
-      shell: bash -el {0}
-      run: source activate myenv
-
-    - name: Activate conda environment on Windows
-      if: runner.os == 'Windows'
-      shell: bash -el {0}
-      run: |
-        .\Miniconda\Scripts\activate.bat myenv
-
     - name: Install dependencies with conda
       shell: bash -el {0}
       run: conda install gdal
