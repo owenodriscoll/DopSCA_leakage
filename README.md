@@ -1,3 +1,5 @@
+![Continuous Integration build in GitHub Actions](https://github.com/owenodriscoll/DopSCA/actions/workflows/main.yml/badge.svg?branch=main)
+
 Create a cdsapi account to access ERA5 wind-field information
 
 Downloaded and unzip at least three sequential Sentinel-1 IW GRD's in VV/VH pol as the edges are lost during beam pattern integration. 
