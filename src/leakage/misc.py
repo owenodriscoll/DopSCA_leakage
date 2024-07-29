@@ -198,13 +198,13 @@ def prediction_ML(filename: str, model_ML: str, field_data: str = 'nrcs_scat_sub
     return data
 
 
-def power_spectrum_custom(da, scaling = 'spectrum', detrend = 'constant', window = 'hann', window_correction = 'True'):
+def power_spectrum_custom(da, dim = None, scaling = 'spectrum', detrend = 'constant', window = 'hann', window_correction = 'True'):
     condition_fill = np.isfinite(da)
     da_filled = xr.where(condition_fill, da, 0)
 
     p2 =xrft.power_spectrum(
         da = da_filled,
-        # dim = 'slow_time',
+        dim = dim,
         scaling = scaling,
         detrend = detrend,
         window = window,

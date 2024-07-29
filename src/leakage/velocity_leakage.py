@@ -4,19 +4,21 @@ import sys
 import glob
 import warnings
 import xsar
-import dask
+import dask  # implicitely loaded 
 import copy
 import pyproj
 import xrft
+import random
 import bottleneck # implicitely loaded somewhere
 import numpy as np
 import xarray as xr
 import dask.array as da
+from scipy import stats
 from scipy.signal import firwin
 from stereoid.oceans.GMF.cmod5n import cmod5n_inverse, cmod5n_forward
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 
-from .misc import round_to_hour, angular_difference, calculate_distance, era5_wind_point, era5_wind_area
+from .misc import round_to_hour, angular_difference, calculate_distance, era5_wind_area
 from .add_dca import DCA_helper
 
 from dataclasses import dataclass
@@ -26,7 +28,6 @@ from typing import Callable, Union, List, Dict, Any
 # --------- TODO LIST ------------
 # FIXME Find correct beam pattern (tapering/pointing?) for receive and transmit, as well as correct N sensor elements
 # FIXME unfortunate combinates of vx_sat, PRF and grid_spacing can lead to artifacts, maybe interpolation?
-# FIXME consider gain compensation in range (weighting beam backscatter weight)
 # FIXME maybe not use linear for interpolation from slant range to ground range?
 
 
@@ -40,28 +41,72 @@ from typing import Callable, Union, List, Dict, Any
 
 # NOTE Calculations assume 
     # NOTE a rectilinear geometry
-    # NOTE perfect right-looking radar with no pitch, yaw and roll
+    # NOTE perfect right-looking radar with no pitch, yaw and roll, no squint assumed in 
+        # NOTE beam mask construction
+        # NOTE velocity variance calculation from coherence loss
+        # NOTE slant to ground range
     # NOTE range cell migration already corrected for
     # NOTE neglecting any Earth-rotation effects. 
     # NOTE same beam pattern on transmit and receive
-    # NOTE two nrcs observations per estiamte such that speckle is reduced by sqrt(2)
-# NOTE Weight is linearly scaled with relative nrcs (e.g. a nrcs of twice the average will yield relative weight of 2.0)
-# NOTE Nrcs weight is calculated per azimuth line in slow time, not per slow time (i.e. not the average over grg and az per slow time)
-# NOTE Assumes square Sentinel-1 pixels. The following processes rely on square pixels
-    # NOTE ERA5 data is resampled to Sentinel-1 grid size and then smoothed
-    # NOTE calculation of az_mask_pixels_cutoff, grg_N, slow_time_N
-# NOTE currently number of antenna elements in azimuth and range are considered equal
-# NOTE Assumes no squint in:
-    # NOTE beam mask construction
-    # NOTE velocity variance calculation from coherence loss
-    # NOTE slant to ground range
+    # NOTE Assumes square Sentinel-1 pixels. The following processes rely on square pixels
+        # NOTE ERA5 data is resampled to Sentinel-1 grid size and then smoothed
+        # NOTE calculation of az_mask_pixels_cutoff
+    # NOTE number of antenna elements in azimuth and range are considered equal
+    # NOTE pulse pair noise assumes a pair of pulses, not any other combination
 
 
 # constants
 c = 3E8
 
+def convert_to_0_360(longitude):
+    return (longitude + 360) % 360
 
-def mean_along_azimuth(x:xr.DataArray|xr.Dataset, azimuth_dim: str = 'az_idx', skipna: bool = False) -> xr.DataArray | xr.Dataset:
+def decorrelation(tau, T):
+    return np.exp(-(tau/T)**2) # 
+
+def pulse_pair_sigma_v_rodriguez2018(T_pp, T_corr_surface, T_corr_Doppler, SNR, Lambda, N_L = 1, gamma = None):
+    """
+    Calculates the Pulse pair velocity standard deviation within a resolution cell due to coherence loss
+
+    NOTE assumes broadside geometry (non-squinted)
+
+    Parameters
+    ----------
+    T_pp : scaler
+        Intra pulse pair time separation
+    T_corr_surface : scaler
+        Decorrelation time of ocean surface at scales of radio wavelength of interest
+    T_corr_Doppler : scaler
+        Decorrelation time of velocities within resolution cell as a result of satellite motion during pulse-pair transmit
+    SNR : scaler
+        Signal to Noise ratio (for pulse-pair system we assume signal to clutter ratio of 1 dominates)
+    Lambda : scaler
+        Wavelength of considered radiowave
+    N_L : int
+        Number of independent looks for given area
+    gamma : scaler
+        coherence in case it should be hard coded
+
+    Returns
+    -------
+    Scaler of estimates surface velocity standard deviation
+
+    """
+    wavenumber = 2 * np.pi / Lambda 
+
+    gamma_velocity = decorrelation(T_pp, T_corr_Doppler) # eq 6 & 7 Rodriguez (2018), NOTE not valid for squint NOTE assumes Gaussian beam pattern
+    gamma_temporal = decorrelation(T_pp, T_corr_surface)
+    gamma_SNR = SNR / (1 + SNR)
+
+    if type(gamma) == type(None):
+        gamma = gamma_temporal * gamma_SNR * gamma_velocity
+    
+    variance = (1 / (2*wavenumber*T_pp))**2 / (2*N_L) * (1-gamma**2)/gamma**2 # eq 14 Rodriguez (2018)
+
+    return np.sqrt(variance), gamma
+
+
+def mean_along_azimuth(x: xr.DataArray | xr.Dataset, azimuth_dim: str = 'az_idx', skipna: bool = False) -> xr.DataArray | xr.Dataset:
     """
     integrates input array/dataset along azimuthal beam pattern
 
@@ -225,7 +270,7 @@ def design_low_pass_filter_2D(da_shape: tuple[int, int], cutoff_frequency: float
 
 def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fs_x: float, fs_y: float, window: str = 'hann', fill_nans: bool = False, return_complex: bool = False) -> xr.DataArray:
     """
-    Low pass filtering am xarray dataset in the Fourier domain using xrft, scipy.signal.windows and np.fft
+    Low pass filtering an xarray dataArray in the Fourier domain using xrft, scipy.signal.windows and np.fft
 
     Assumes both x and y have same dimensions
 
@@ -288,7 +333,7 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fs_x: float, f
 
 def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fs_x: float, fs_y: float, window: str = 'hann', fill_nans: bool = False, return_complex: bool = False) -> xr.Dataset:
     """
-    Wrapper of low_pass_filter_2D for each array in dataset
+    Wrapper of low_pass_filter_2D for each dataArray in dataset
 
     Assumes both x and y have same dimensions
 
@@ -325,9 +370,6 @@ def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fs_x: fl
                                               return_complex = return_complex,
                                               ) for var in ds
         })
-
-    
-
 
     return ds_filt
 
@@ -390,6 +432,44 @@ def compute_padding_1D(length_desired: int, length_current: int) -> tuple[int, i
     pad = int(np.ceil(pad_total/2))
     return pad
 
+def phase_error_gen(coherence, n_samples: Union[int, tuple], theta: float = 0,  n_bins: int = 20001, random_state: Union[float, int, types.NoneType]= None):
+    """
+    1-Look phase-difference probability density function (pdf) from equation 19 in:
+    Jong-Sen Lee et al., (1994) "Statistics of phase difference and product magnitude of multi-look processed Gaussian signals"
+    
+    Input
+    -----
+    coherence: float,
+        coherence of phase difference
+    n_samples: Union[int, tuple], 
+        Number of samples to generate given as a number or as a shape within a tuple
+    theta: float,
+        phase offset, in radian
+    n_bins: int,
+        Number of discrete bins to generate pdf
+    random_state: Union[int, float, types.NoneType],
+        Fixes random state if float or int is provided
+    """
+
+    if type(random_state) is not type(None):
+        random.seed(random_state)
+
+    if type(n_samples) == tuple:
+        target_shape = n_samples
+        N = np.prod(target_shape)
+    else:
+        N = n_samples
+
+    psi = np.linspace(-np.pi, np.pi, n_bins)
+    beta = coherence * np.cos(psi - theta)
+    pdf = ((1 - coherence**2) * (np.sqrt(1 - beta**2) + beta * (np.pi-(np.arccos(beta))))) / (2 * np.pi * (1 - beta**2)**(1.5))
+    samples = np.array(random.choices(population=psi, weights=pdf, k=N))
+
+    if type(n_samples) == tuple:
+        samples = samples.reshape(target_shape)
+
+    return samples
+
 @dataclass
 class S1DopplerLeakage:
     """
@@ -402,13 +482,13 @@ class S1DopplerLeakage:
     z0: float
         average satellite orbit height in meters
     antenna_length: float
-
+        length of antenna for computation of azimuthal component of beam pattern
     antenna_height: float
-
+        height of antenna for computation of range component of beam pattern
     antenna_elements: int
-        number of elements in azimuth and range (currently must be equal) used for phased array tapering on receive
+        number of elements in azimuth and range (currently must be equal), only used for phased array tapering
     antenna_weighting: float
-        element weighting in azimuth and range (currently must be equal) used for phased array tapering on receive
+        element weighting in azimuth and range (currently must be equal), only used for phased array tapering
     beam_pattern: str
         "sinc" or "phased_array". Determines the beam width and side-lobe sensitivity
     swath_start_incidence_angle_scat: float
@@ -419,12 +499,16 @@ class S1DopplerLeakage:
         along-azimuthal velocity of satellite, in meters per second
     PRF: int
         pulse repetition frequency
+    SNR: float
+        Signal to Noise Ratio for calculation of velocity variance. Because SNR is dominated by signal to clutter for pulse pair in DopSCA, SNR is approx 1 on average
+    T_pp: float
+        Separation time (in seconds) between pulses of pulse_pair
     az_footprint_cutoff: int
         along azimuth beam footprint to consider per pulse (outside is clipped off), in meters
     grid_spacing: int
-        pixel spacing in meters to which Sentinel-1 SAFE files are coarsened
+        pixel spacing at which Sentinel-1 SAFE files are loaded
     resolution_product: int
-        spatial resolution to which subscene results are averaged, e.g. if resolution_product = 25 km, moving average window is 12.5 km (pixel size permitting)
+        surface-projected spatial resolution to which subscene results are averaged
     product_averaging_window: str, 'hann'
         window with which to low pass towards product resolution. Window must be available from scipy.signal.get_window.
     era5_directory: str
@@ -458,9 +542,6 @@ class S1DopplerLeakage:
         "Rostan, F., Ulrich, D., Riegger, S., & Østergaard, A. (2016, July). MetoP-SG SCA wind scatterometer design and performance. In 2016 
             IEEE International Geoscience and Remote Sensing Symposium (IGARSS) (pp. 7366-7369). IEEE."
 
-    Output:
-    -------
-
     """
 
     filename: Union[str, list] 
@@ -469,12 +550,14 @@ class S1DopplerLeakage:
     antenna_length: float = 3.2                                         # for mid beam, Fois et al,. (2015)
     antenna_height: float = 0.3                                         # for mid beam, Fois et al,. (2015)
     antenna_elements: int = 4                                           # for mid beam, Rostan et al,. (2016)
-    antenna_weighting: float = 0.5                                      # ?
+    antenna_weighting: float = 0.75                                     # ?
     beam_pattern: str = "sinc"                                          # ?, presumed tapered
     swath_start_incidence_angle_scat: float = 30                        # custom, valid range of incidence angles is 20-65 degrees, Hoogeboom et al,. (2018) (is this for fore/aft beam or mid?)
     boresight_elevation_angle_scat: float = 40                          # ?
     vx_sat: int = 6800                                                  # Hoogeboom et al,. (2018)
     PRF: int = 4                                                        # PRF per antenna, total PRF is 32 Hz for 6 antennas, Hoogeboom et al,. (2018)
+    SNR: float = 1.0                                                    # Signal to noise ratio, for Pulse Pair is approx 1 on average
+    T_pp: float = 1.15E-4                                               # pulse-pair separation time 
     az_footprint_cutoff: int = 80_000                                   # custom
     grid_spacing: int = 75                                              # assuming 150 m ground range resolution, Hoogeboom et al,. (2018)
     resolution_product: int = 25_000                                    # Hoogeboom et al,. (2018)
@@ -488,22 +571,23 @@ class S1DopplerLeakage:
     _pulsepair_noise: bool = True
     _speckle_noise: bool = True
     _interpolator: str = 'linear'
+    _gamma_hardcode: Union[types.NoneType, float] = None
 
 
     def __post_init__(self):
 
-        self.Lambda = c / self.f0 # m
+        self.Lambda = c / self.f0
         self.stride = self.vx_sat / self.PRF
         self.az_mask_pixels_cutoff = int(self.az_footprint_cutoff/2//self.grid_spacing) 
-        self.grg_N = int(self.resolution_product // self.grid_spacing)           # number of fast-time samples to average to scene size
-        self.slow_time_N = int(self.resolution_product // self.stride)           # number of slow-time samples to average to scene size
-        if type(self.era5_smoothing_window) == types.NoneType:                   # set smoothing window of era5 based on grid size of loaded S1 data
-            self.era5_smoothing_window = int((200 / self.grid_spacing) * 15 )
+        
+        # set smoothing window of era5 based on grid size of loaded S1 data
+        if type(self.era5_smoothing_window) == types.NoneType:                   
+            self.era5_smoothing_window = int((200 / self.grid_spacing) * 15 ) # a bit arbitrary values, but they dont really matter
             
         # Store attributes in object
         attributes_to_store = copy.deepcopy(self.__dict__)
 
-        # if input values are None or Booleans, convert them to string type
+        # If input values are None or Booleans, convert them to string type
         attributes_to_store_updated = {key: value if value is not None and type(value) is not bool else str(value) for key, value in attributes_to_store.items()}
         self.attributes_to_store = attributes_to_store_updated
 
@@ -511,62 +595,13 @@ class S1DopplerLeakage:
         if self.stride % self.grid_spacing != 0:
             warnings.warn("Combination of vx_sat, PRF and grid_spacing may lead to aliasing: (vx_sat / PRF) % grid_spacing != 0")
 
-    @staticmethod
-    def convert_to_0_360(longitude):
-        return (longitude + 360) % 360
-
-    @staticmethod
-    def decorrelation(tau, T):
-        return np.exp(-(tau/T)**2) # 
-
-    @staticmethod
-    def pulse_pair_sigma_v(T_pp, T_corr_surface, T_corr_Doppler, SNR, Lambda, N_L = 1):
-        """
-        Calculates the Pulse pair velocity standard deviation within a resolution cell due to coherence loss
-
-        NOTE assumes broadside geometry (non-squinted)
-
-        Parameters
-        ----------
-        T_pp : scaler
-            Intra pulse pair time separation
-        T_corr_surface : scaler
-            Decorrelation time of ocean surface at scales of radio wavelength of interest
-        T_corr_Doppler : scaler
-            Decorrelation time of velocities within resolution cell as a result of satellite motion during pulse-pair transmit
-        SNR : scaler
-            Signal to Noise ratio (for pulse-pair system we assume signal to clutter ratio of 1 dominates)
-        Lambda : scaler
-            Wavelength of considered radiowave
-        N_L : int
-            Number of independent looks for given area
-
-        Returns
-        -------
-        Scaler of estimates surface velocity standard deviation
-
-        """
-        wavenumber = 2 * np.pi / Lambda 
-
-        gamma_velocity = S1DopplerLeakage.decorrelation(T_pp, T_corr_Doppler) # eq 6 & 7 Rodriguez (2018), NOTE not valid for squint NOTE assumes Gaussian beam pattern
-        gamma_temporal = S1DopplerLeakage.decorrelation(T_pp, T_corr_surface)
-        gamma_SNR = SNR / (1 + SNR)
-
-        gamma = gamma_temporal * gamma_SNR * gamma_velocity
-        
-        variance = (1 / (2*wavenumber*T_pp))**2 / (2*N_L) * (1-gamma**2)/gamma**2 # eq 14 Rodriguez (2018)
-
-        return np.sqrt(variance), gamma
-
-
-    # TODO add chunking
     def open_data(self):
         """
         Open data from a file or a list of files. First check if file can be reloaded
         """
 
         attrs_to_str = ['start_date', 'stop_date', 'footprint', 'multidataset']
-        vars_to_keep = ['ground_heading', 'time', 'incidence', 'latitude', 'longitude', 'sigma0']
+        vars_to_keep = ['ground_heading', 'time', 'incidence', 'latitude', 'longitude', 'sigma0', 'ground_range_approx']
         coords_to_drop = "spatial_ref"
         pol = "VV"
 
@@ -595,6 +630,14 @@ class S1DopplerLeakage:
             """
             id_start = filename.rfind('_') + 1 
             return filename[id_start:id_start+unique_id_length]
+        
+        def compute_S1_ground_range(ds: xr.Dataset, c = 3E8) -> xr.DataArray:
+            """"
+            Computes approximate ground range corresponding to elevation angle and slant range travel time
+            """
+            slant_range_distance = (ds.slant_range_time * c) / 2
+            ground_range_approx = np.sin(np.deg2rad(ds.elevation)) * slant_range_distance
+            return ground_range_approx
 
 
         def open_new_file(filename, grid_spacing):
@@ -664,6 +707,9 @@ class S1DopplerLeakage:
             # keep only VV polarisation
             self.S1_file = self.S1_file.sel(pol = pol)
 
+            # compute approximate ground range
+            self.S1_file['ground_range_approx'] = compute_S1_ground_range(ds = self.S1_file, c = c)
+
             # store as .nc file ...
             self.S1_file[vars_to_keep].to_netcdf(storage_name)
 
@@ -684,6 +730,8 @@ class S1DopplerLeakage:
         This method can be skipped by manually providing a "wdir_wrt_sensor" attribute to "self".
         Either an integer/float as an average over the area of interest, or an array, in which case the
         array must be the same shape as the backscatter array in the S1_file.
+
+        We do some ERA5 interpolating to the NRCS grid with some arbitrary choiced, these don't really affect results since ERA5 is coarse to begin with
         """
 
         var_time = "time"
@@ -702,7 +750,7 @@ class S1DopplerLeakage:
         latmean, lonmean = latitudes.mean().values*1, longitudes.mean().values*1
         latmin, latmax = latitudes.min().values*1, latitudes.max().values*1
         lonmin, lonmax = longitudes.min().values*1, longitudes.max().values*1
-        lonmin, lonmax = [self.convert_to_0_360(i) for i in [lonmin, lonmax]] # NOTE correction for fact that ERA5 goes between 0 - 360
+        lonmin, lonmax = [convert_to_0_360(i) for i in [lonmin, lonmax]] # NOTE correction for fact that ERA5 goes between 0 - 360
 
         if type(self.era5_file) == str:
             era5 = xr.open_dataset(self.era5_file)
@@ -739,7 +787,7 @@ class S1DopplerLeakage:
             method = 'nearest')
 
         era5_subset = era5_subset_time.sel(
-            longitude = self.convert_to_0_360(self.S1_file[var_lon]),
+            longitude = convert_to_0_360(self.S1_file[var_lon]),
             latitude = self.S1_file[var_lat],
             method = 'nearest')
 
@@ -748,7 +796,7 @@ class S1DopplerLeakage:
         # The resampled grid size should still be ~50km (S1 resolution * era5_smoothing_window * era5_undersample_factor ~ 50km)
         resolution_condition = self.grid_spacing * self.era5_undersample_factor * (1 * self.era5_smoothing_window) # NOTE * 1 because only mean window operations considered
 
-        # check whether resampling is unacceptable
+        # checks whether resampling is unacceptable
         # resolution is ideally twice the grid spacing and 1 degree is approximately 100km
         resolution_era5_deg = 2 * min([abs(era5.latitude.diff(dim = 'latitude')).min(), abs(era5.longitude.diff(dim = 'longitude')).min()])
         resolution_era5_m = 100e3 * resolution_era5_deg 
@@ -834,7 +882,6 @@ class S1DopplerLeakage:
         )
 
         # find points with nan's or poor backscatter estimates
-        # condition_pre = data['nrcs'].isnull()
         condition_to_fix = ((data['nrcs'].isnull()) | (data['nrcs'] <= 0))
         data['nrcs'] = data['nrcs'].where(~condition_to_fix)
 
@@ -843,13 +890,14 @@ class S1DopplerLeakage:
         data['nrcs'] = interpolater(data['nrcs'])
         conditions_post = ((data['nrcs'].isnull()) |(data['nrcs'] <= 0))
 
-        # add windfield
+        # add wind direction to data
         if isinstance(self.wdir_wrt_sensor, xr.DataArray):
             data['wdir_wrt_sensor'] = ([dim_az, dim_grg], self.wdir_wrt_sensor.data)
         elif isinstance(self.wdir_wrt_sensor, (float, int)):
             data['wdir_wrt_sensor'] = ([dim_az, dim_grg], np.ones_like(data['nrcs']) * self.wdir_wrt_sensor)
-        windfield = cmod5n_inverse(data["nrcs"].data, data['wdir_wrt_sensor'].data, data["inc"].data)
 
+        # compute wind field
+        windfield = cmod5n_inverse(data["nrcs"].data, data['wdir_wrt_sensor'].data, data["inc"].data)
         data['windfield'] = ([dim_az, dim_grg], windfield)
         data["windfield"] = data["windfield"].assign_attrs(units= 'm/s', description = 'CMOD5n Windfield for Sentinel-1 backscatter')
 
@@ -907,6 +955,8 @@ class S1DopplerLeakage:
 
         # prepare data by chunking and conversion to lower bit
         self.data = self.data.astype('float32').chunk('auto')
+
+        # this loop is an ugly way of sliding and subsetting along azimuth 
         for i, st in enumerate(idx_slow_time):
 
             a = self.data.isel(slow_time = st, az = idx_az[i])
@@ -960,7 +1010,10 @@ class S1DopplerLeakage:
     def compute_beam_pattern(self):
         """
         Computes a beam pattern to be applied along the entire dataset.
-        NOTE assumes similar antenna parameters for both range and azimuth
+        # NOTE The following computations are directly computed, a delayed lazy computation may be better
+        # NOTE Currently tapering only possible in azimuth 
+        # NOTE Same beam pattern assumed for transmit and receive
+        # NOTE Beam patterns are already in intensity, square is only needed for two-way pattern
 
         Input
         -----
@@ -968,41 +1021,36 @@ class S1DopplerLeakage:
         antenna_weighting: float, int; weighting parameter as defined by the called beam pattern functions. only affects when beam pattern = phased_array
         """
         
-        self.data['distance_slant_range'] = np.sqrt(self.data['distance_ground']**2 + self.z0**2)
+        self.data['distance_slant_range'] = calculate_distance(x = self.data['distance_ground'], y = self.z0)  #np.sqrt(self.data['distance_ground']**2 + self.z0**2)
         self.data['az_angle_wrt_boresight'] = np.arcsin((self.data['distance_az'])/self.data['distance_slant_range']) # NOTE arcsin instead of tan as distance_slant_range includes azimuthal angle
         self.data['grg_angle_wrt_boresight'] = np.deg2rad(self.data['inc_scatt_eqv'] - self.boresight_elevation_angle_scat)
         self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
 
-        # NOTE the following computations are directly computed, a delayed lazy computation may be better
-        # NOTE Currently assumes same antenna elements and weighting in range as in azimuth 
         N = self.antenna_elements 
         w = self.antenna_weighting 
         
         # Assumes same patter on transmit and receive
         if self.beam_pattern == "sinc":
-            beam_az_tx = sinc_bp(sin_angle=self.data.az_angle_wrt_boresight, L = self.antenna_length, f0 = self.f0)
-            beam_az = beam_az_tx ** 2
+            beam_az = sinc_bp(sin_angle=np.sin(self.data.az_angle_wrt_boresight), L = self.antenna_length, f0 = self.f0)
+            beam_az_two_way = beam_az**2
         elif self.beam_pattern == "phased_array":
-            # beam_az_tx = phased_array(sin_angle=self.data.az_angle_wrt_boresight, L = self.antenna_length, f0 = self.f0, N = N, w = w).squeeze()
-            beam_az_rx = phased_array(sin_angle=self.data.az_angle_wrt_boresight, L = self.antenna_length, f0 = self.f0, N = N, w = w).squeeze()
-            beam_az = beam_az_rx**2 # * beam_az_tx
+            beam_az = phased_array(sin_angle=np.sin(self.data.az_angle_wrt_boresight), L = self.antenna_length, f0 = self.f0, N = N, w = w).squeeze()
+            beam_az_two_way = beam_az**2 
         
-        beam_grg_tx = sinc_bp(sin_angle=self.data.grg_angle_wrt_boresight, L = self.antenna_height, f0 = self.f0)
-        beam_grg_rx = beam_grg_tx
-        beam_grg = beam_grg_tx * beam_grg_rx
-        beam = beam_az * beam_grg
+        beam_grg = sinc_bp(sin_angle=np.sin(self.data.grg_angle_wrt_boresight), L = self.antenna_height, f0 = self.f0)
+        beam_grg_two_way = beam_grg**2
+        
+        beam = beam_az_two_way * beam_grg_two_way
         self.data['beam'] = ([*self.data.az_angle_wrt_boresight.sizes], beam)
 
         self.data = self.data.astype('float32')
         return
 
+
     def compute_leakage_velocity(self, add_pulse_pair_uncertainty = True):
         """
-        Computes Line of Sight (LoS) leakage Doppler and velocity considering the beam pattern, nrcs weighting and geometric Doppler
-        NOTE range-dependend gain compensation (weight_rg) returns overestimated signal at sidelobe nulls
+        Computes leakage Doppler and velocity considering the beam pattern, nrcs weighting and geometric Doppler
         NOTE assumes no squint and a flat Earth
-        NOTE computes LoS Dopplers
-        NOTE backscatter weight calculated per range line
 
         Parameters
         ----------
@@ -1011,63 +1059,36 @@ class S1DopplerLeakage:
         """
 
         # compute geometrical doppler, beam pattern and nrcs weigths
-        self.data['nrcs_weight'] = (self.data['nrcs_scat_eqv'] / self.data['nrcs_scat_eqv'].mean(dim=['az_idx'])) 
-        self.data['beam_weight'] = (self.data['beam'] / self.data['beam'].mean(dim=['az_idx'])) 
+        # self.data['nrcs_weight'] = self.data['nrcs_scat_eqv'] / mean_along_azimuth(self.data['nrcs_scat_eqv'])#.mean(dim=['az_idx'])) 
+        self.data['beam_weight'] = self.data['beam'] / mean_along_azimuth(self.data['beam'])#.mean(dim=['az_idx'])) 
+        self.data['weight'] = (self.data['beam'] * self.data['nrcs_scat_eqv']) / mean_along_azimuth(self.data['beam'] * self.data['nrcs_scat_eqv'])
         self.data['elevation_angle'] = np.radians(self.data['inc_scatt_eqv']) # NOTE assumes flat Earth
+        self.data['elevation_angle_scat'] = mean_along_azimuth(np.radians(self.data['inc_scatt_eqv_cube']))
 
         self.data['dop_geom'] = vel2dop(
             velocity=self.vx_sat,
             Lambda=self.Lambda,
-            angle_incidence=self.data['elevation_angle'],
+            angle_incidence=self.data['elevation_angle'], # NOTE assumes flat Earth
             angle_azimuth=self.data['az_angle_wrt_boresight'],
             degrees=False,
         ) 
 
-        self.data['dop_beam_weighted'] = self.data['dop_geom'] * self.data['beam_weight'] * self.data['nrcs_weight']
+        self.data['dop_beam_weighted'] = self.data['dop_geom'] * self.data['weight']# self.data['beam_weight'] * self.data['nrcs_weight']
 
         # beam and backscatter weighted geometric Doppler is interpreted as geophysical Doppler, i.e. Leakage
         self.data['V_leakage'] = dop2vel(
             Doppler=self.data['dop_beam_weighted'],
             Lambda=self.Lambda,
             angle_incidence=self.data['elevation_angle'],
-            angle_azimuth= np.pi/2, # the geometric doppler is interpreted as LoS motion, so azimuth angle component must result in value of 1 (i.e. pi/2)
+            angle_azimuth= np.pi/2, # the geometric doppler is interpreted as radial motion, so azimuth angle component must result in value of 1 (i.e. pi/2)
             degrees=False,
         )
         
         # calculate scatterometer nrcs at scatterometer resolution (integrate nrcs)
         self.data['nrcs_scat'] = mean_along_azimuth(self.data['nrcs_scat_eqv'] * self.data['beam_weight'])
+        
         # sum over azimuth to receive range-slow_time results
         self.data[['doppler_pulse_rg', 'V_leakage_pulse_rg']] = mean_along_azimuth(self.data[['dop_beam_weighted', 'V_leakage']])
-        
-        # add attribute
-        self.data['V_leakage_pulse_rg'] = self.data['V_leakage_pulse_rg'].assign_attrs(units= 'm/s', description = 'Line of Sight velocity ')
-        self.data['doppler_pulse_rg'] = self.data['doppler_pulse_rg'].assign_attrs(units= 'Hz', description = 'Line of Sight Doppler frequency ')
-
-        # add pulse pair velocity uncertainty
-        if (self._pulsepair_noise) & (add_pulse_pair_uncertainty):
-            wavenumber = 2 * np.pi / self.Lambda
-
-            # -- calculates average azimuthal beam standard deviation within -3 dB 
-            beam_db = 10 * np.log10(self.data.beam)
-            beam_3dB = xr.where((beam_db- beam_db.max(dim = 'az_idx'))< -3, np.nan, 1)*self.data.az_angle_wrt_boresight
-            sigma_az_angle = beam_3dB.std(dim = 'az_idx').mean().values*1
-
-            T_corr_Doppler = 1 / (np.sqrt(2) * wavenumber * self.vx_sat * sigma_az_angle) # equation 7 from Rodriguez et al., (2018)
-            T_pp = 1.15E-4 # intra pulse-pair pulse separation time, Hoogeboom et al., (2018)
-            U = 6 # Average wind speed assumed of 6 m/s
-            T_corr_surface = 3.29 * self.Lambda / U # Decorrelation time of surface at radio frequency of interest (below eq. 19 Theodosious et al., 2023)
-            SNR = 1 # because SNR is dominated by signal to clutter, which for Pulse Pair is approx 1
-
-            # NOTE assumes no squint
-            self.velocity_error, self.gamma = self.pulse_pair_sigma_v(
-                T_pp = T_pp, 
-                T_corr_surface = T_corr_surface, 
-                T_corr_Doppler = T_corr_Doppler, 
-                SNR = SNR,  
-                Lambda = self.Lambda)
-
-        else:
-            self.velocity_error = 0
             
         # compute approximate ground range spatial resolution of scatterometer (slant range resolution =/= ground range resolution)
         grg_for_safekeeping = self.data.grg
@@ -1088,9 +1109,41 @@ class S1DopplerLeakage:
         reference = 'V_leakage_pulse_rg'
         dim_interp = 'grg'
         shape_ref = self.data[reference].shape
-        da_ones_independent = da_ones_independent_samples(self.data[reference], dim_to_resample= 0, samples_per_indepent_sample=2)
-        V_pp = self.velocity_error * np.random.randn(*da_ones_independent.shape)
-        da_V_pp = V_pp * da_ones_independent
+
+        # assumes data along resample dim is oversampled by a factor 2, such that there are two samples per independent sample resolution
+        da_ones_independent = da_ones_independent_samples(self.data[reference], dim_to_resample=0, samples_per_indepent_sample=2)
+
+        # add pulse pair velocity uncertainty
+        if (self._pulsepair_noise) & (add_pulse_pair_uncertainty):
+            wavenumber = 2 * np.pi / self.Lambda
+
+            # -- calculates average azimuthal beam standard deviation within -3 dB 
+            beam_db = 10 * np.log10(self.data.beam)
+            beam_3dB = xr.where((beam_db- beam_db.max(dim = 'az_idx'))< -3, np.nan, 1)*self.data.az_angle_wrt_boresight
+            sigma_az_angle = beam_3dB.std(dim = 'az_idx').mean().values*1
+
+            T_corr_Doppler = 1 / (np.sqrt(2) * wavenumber * self.vx_sat * sigma_az_angle) # equation 7 from Rodriguez et al., (2018)
+            T_pp = self.T_pp # intra pulse-pair pulse separation time, Hoogeboom et al., (2018)
+            U = 6 # Average wind speed assumed of 6 m/s
+            T_corr_surface = 3.29 * self.Lambda / U # Decorrelation time of surface at radio frequency of interest (below eq. 19 Theodosious et al., 2023)
+
+            # NOTE assumes no squint
+            # NOTE we do not use this velocity error instead, we calculate that using phase uncerttainties from Lee et al. 1994
+            _, self.gamma = pulse_pair_sigma_v_rodriguez2018(
+                T_pp = T_pp, 
+                T_corr_surface = T_corr_surface, 
+                T_corr_Doppler = T_corr_Doppler, 
+                SNR = self.SNR, 
+                Lambda = self.Lambda,
+                gamma = self._gamma_hardcode)
+            
+            phase_uncertainty = phase_error_gen(coherence = self.gamma, n_samples=(da_ones_independent.shape), random_state=self.random_state)
+            self.velocity_error = phase_uncertainty / 2 / wavenumber / self.T_pp 
+
+        else:
+            self.velocity_error = 0
+
+        da_V_pp = self.velocity_error * da_ones_independent
 
         pad = compute_padding_1D(length_desired=self.data[reference].sizes[dim_interp], length_current=da_V_pp.sizes['dim_0'])
         
@@ -1101,8 +1154,8 @@ class S1DopplerLeakage:
         V_pp = V_pp_c[:shape_ref[0], :shape_ref[1]]
         self.V_pp_c = V_pp_c
 
-        self.data['V_pp'] = xr.zeros_like(self.data['V_leakage_pulse_rg']) + V_pp.data
-        self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp'].real # complex part should be negligible
+        self.data['V_pp'] = (xr.zeros_like(self.data['V_leakage_pulse_rg']) + V_pp.data) / np.sin(self.data['elevation_angle_scat'])
+        self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp'].real # complex part should be negligible anyways
 
         # ------- re-interpolate to higher sampling to maintain uniform ground samples -------
         self.data = self.data.interp(grg=grg_for_safekeeping, method=self._interpolator)
@@ -1113,14 +1166,13 @@ class S1DopplerLeakage:
         data_subscene = [name + '_subscene' for name in data_4subscene]
 
         fs_x, fs_y = 1/self.grid_spacing, 1/self.stride
-        data_lp = low_pass_filter_2D_dataset(self.data[data_4subscene], 
+        data_lowpass = low_pass_filter_2D_dataset(self.data[data_4subscene], 
                                              cutoff_frequency = 1 / (self.resolution_product), 
                                              fs_x=fs_x, 
                                              fs_y=fs_y,
                                              window=self.product_averaging_window,
-                                             fill_nans=True) # FIXME why *2 ?
-        self.data[data_subscene] = data_lp
-        # self.data[data_subscene] = self.data[data_4subscene].rolling(grg=self.grg_N, slow_time=self.slow_time_N, center=True).mean()
+                                             fill_nans=True)
+        self.data[data_subscene] = data_lowpass
         return
 
 
@@ -1148,30 +1200,31 @@ class S1DopplerLeakage:
 
         # add speckle noise
         if self._speckle_noise:
-            # noise_multiplier = self.speckle_noise(nrcs_scat_grg_interpolated.shape, random_state = self.random_state)
 
             reference = 'nrcs_scat'
             dim_interp = 'grg'
             nrcs_scat_grg = self.data[reference]
-            nrcs_scat_sl = nrcs_scat_grg.interp(grg=self.new_grg_pixel, method=self._interpolator)
+            nrcs_scat_slrg = nrcs_scat_grg.interp(grg=self.new_grg_pixel, method=self._interpolator)
 
-            shape_ref = nrcs_scat_sl.shape
-            da_ones_independent = da_ones_independent_samples(nrcs_scat_sl, dim_to_resample= 0, samples_per_indepent_sample=2)
-            # d = da_ones_independent_samples(test.data.nrcs_scat)
+            shape_ref = nrcs_scat_slrg.shape
+            da_ones_independent = da_ones_independent_samples(nrcs_scat_slrg, dim_to_resample= 0, samples_per_indepent_sample=2)
             speckle_c = complex_speckle_noise(da_ones_independent.shape, random_state=self.random_state)
             da_speckle_c = speckle_c * da_ones_independent
 
             # pad in fourier domain
-            pad = compute_padding_1D(length_desired=nrcs_scat_sl.sizes[dim_interp], length_current=da_speckle_c.sizes['dim_0'])
+            pad = compute_padding_1D(length_desired=nrcs_scat_slrg.sizes[dim_interp], length_current=da_speckle_c.sizes['dim_0'])
             da_speckle_c_padded = padding_fourier(da_speckle_c, padding = (pad, pad), dimension= 'dim_0')
 
+            # we can again clip noise array since it is still independent of NRCS
             da_speckle_c_padded_cut = da_speckle_c_padded[:shape_ref[0], :shape_ref[1]]
             self.da_speckle_c_padded_cut = da_speckle_c_padded_cut
-            speckle = abs(da_speckle_c_padded_cut)**2 / 2
 
-            nrcs_scat_sl_speckle = nrcs_scat_sl * speckle.data            
+            # compute real speckle and add to and add speckle
+            speckle = abs(da_speckle_c_padded_cut)**2 / 2
+            nrcs_scat_speckle_slrg = nrcs_scat_slrg * speckle.data
+            
             # interpolate to grg
-            nrcs_scat_speckle = nrcs_scat_sl_speckle.interp(grg=self.data.grg, method=self._interpolator)
+            nrcs_scat_speckle = nrcs_scat_speckle_slrg.interp(grg=self.data.grg, method=self._interpolator)
 
         else:
             # already up and downscaled so not necessary here
@@ -1180,7 +1233,7 @@ class S1DopplerLeakage:
         # interpolate estimated scatterometer data back to S1 grid size
         slow_time_upsamp = np.linspace(self.data.slow_time[0], self.data.slow_time[-1], idx_end - idx_start) 
         nrcs_scat_upsamp = nrcs_scat_speckle.T.interp(slow_time = slow_time_upsamp)
-        inc_scat_upsamp = self.data.inc_scatt_eqv_cube.mean(dim='az_idx').T.interp(slow_time = slow_time_upsamp)
+        inc_scat_upsamp = np.degrees(self.data['elevation_angle_scat']).T.interp(slow_time = slow_time_upsamp)
 
         # apply cropping 
         new_nrcs[idx_start: idx_end, :] = nrcs_scat_upsamp
@@ -1211,7 +1264,7 @@ class S1DopplerLeakage:
 
     def apply(self, 
               data_to_return: list[str] = 
-                                ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 'V_sigma', 'V_sigma_subscene',
+                                ['az', 'doppler_pulse_rg', 'V_leakage_pulse_rg', 'nrcs_scat', 'V_sigma', 'V_sigma_subscene',
                                  'doppler_pulse_rg_subscene', 'doppler_pulse_rg_subscene_inverted',
                                  'V_leakage_pulse_rg_subscene', 'V_leakage_pulse_rg_subscene_inverted',
                                  'nrcs_scat_subscene', 'doppler_pulse_rg_inverted',
@@ -1234,8 +1287,6 @@ class S1DopplerLeakage:
 
         self.data[data_to_return] = self.data[data_to_return].chunk('auto').persist()
         return
-    
-
 
 
 def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
@@ -1264,20 +1315,18 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
     obj_copy.data['dca_scatt'] = obj_copy.data['dca_s1'] * reprojection_factor
     obj_copy.data['wb_scatt'] = obj_copy.data['wb_s1'] * reprojection_factor
     
-    
-    cls.data[['dca', 'wb']] = obj_copy.data[['dca_scatt', 'wb_scatt']] * cls.data['beam_weight'] * cls.data['nrcs_weight']
+    cls.data[['dca', 'wb']] = obj_copy.data[['dca_scatt', 'wb_scatt']] * cls.data['weight'] # cls.data['beam_weight'] * cls.data['nrcs_weight']
     cls.data[['dca_pulse_rg', 'wb_pulse_rg']] = mean_along_azimuth(cls.data[['dca', 'wb']] )
-    cls.data['doppler_w_dca'] =  (obj_copy.data['dca_scatt'] + cls.data['dop_geom']) * cls.data['beam_weight'] * cls.data['nrcs_weight']
+    cls.data['doppler_w_dca'] =  (obj_copy.data['dca_scatt'] + cls.data['dop_geom']) * cls.data['weight'] #cls.data['beam_weight'] * cls.data['nrcs_weight']
     cls.data['doppler_w_dca_pulse_rg'] = mean_along_azimuth(cls.data['doppler_w_dca'])
     
     cls.data = cls.data.astype('float32')
-
 
     cls.data[['V_dca', 'V_wb']] = dop2vel(
             Doppler=cls.data[['dca', 'wb']],
             Lambda=cls.Lambda,
             angle_incidence=cls.data['inc_scatt_eqv'],
-            angle_azimuth= 90, # the geometric doppler is interpreted as LoS motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
+            angle_azimuth= 90, # the geometric doppler is interpreted as radial motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
             degrees=True,
         )
     cls.data[['V_dca_pulse_rg', 'V_wb_pulse_rg']] = mean_along_azimuth(cls.data[['V_dca', 'V_wb']])
@@ -1286,7 +1335,7 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
             Doppler=cls.data['doppler_w_dca'],
             Lambda=cls.Lambda,
             angle_incidence=cls.data['inc_scatt_eqv'],
-            angle_azimuth= 90, # the geometric doppler is interpreted as LoS motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
+            angle_azimuth= 90, # the geometric doppler is interpreted as radial motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
             degrees=True,
         )
 
@@ -1301,17 +1350,16 @@ def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
     # perform averaging as prescribed in cls
     scenes_to_average = ['wb_pulse_rg', 'V_wb_pulse_rg', 'dca_pulse_rg', 'doppler_w_dca_pulse_rg', 'V_dca_pulse_rg', 'V_doppler_w_dca_pulse_rg']
     scenes_averaged = [i+'_subscene' for i in scenes_to_average]
-    # cls.data[scenes_averaged] = cls.data[scenes_to_average].rolling(grg=cls.grg_N, slow_time=cls.slow_time_N, center=True).mean()
 
-    # NOTE here we confusing switch the definitions of fs_x and fs_y because the coordinates of loaded Doppler data follows a different order
+    # NOTE here we confusingly switch the definitions of fs_x and fs_y because the coordinates of loaded Doppler data follows a different order
     fs_x, fs_y = 1/cls.stride, 1/cls.grid_spacing
-    data_lp = low_pass_filter_2D_dataset(cls.data[scenes_to_average], 
+    data_lowpass = low_pass_filter_2D_dataset(cls.data[scenes_to_average], 
                                          cutoff_frequency = 1/(cls.resolution_product), 
                                          fs_x=fs_x, 
                                          fs_y=fs_y,
                                          window=cls.product_averaging_window,
-                                         fill_nans=True) # FIXME why *2 ?
-    cls.data[scenes_averaged] = data_lp
+                                         fill_nans=True)
+    cls.data[scenes_averaged] = data_lowpass
 
     # a bit of reschuffling of coordinates
     cls.data = cls.data.transpose('az_idx', 'grg', 'slow_time').chunk('auto')
