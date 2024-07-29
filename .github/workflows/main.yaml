@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - dev_CI/CD
+      - owenodriscoll-patch-1
 
 jobs:
   build:
