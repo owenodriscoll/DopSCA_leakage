@@ -25,24 +25,26 @@ jobs:
         auto-activate-base: false
 
     - name: Create conda environment
-      shell: bash
+      shell: bash -el {0}
       run: conda create --name myenv python=${{ matrix.python-version }}
 
     - name: Activate conda environment
       if: runner.os != 'Windows'
-      shell: bash
+      shell: bash -el {0}
       run: source activate myenv
 
     - name: Activate conda environment on Windows
       if: runner.os == 'Windows'
+      shell: bash -el {0}
       run: |
         .\Miniconda\Scripts\activate.bat myenv
 
     - name: Install dependencies with conda
-      shell: bash
+      shell: bash -el {0}
       run: conda install gdal
 
     - name: Install dependencies with pip
+      shell: bash -el {0}
       run: pip install xsar[s1] stereoid
 
 
