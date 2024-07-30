@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ["macos-latest", "window-latest", "ubuntu-latest"]
+        os: ["macos-latest", "windows-latest", "ubuntu-latest"]
         python-version: ["3.12"]
     steps:
     - name: Checkout repository
@@ -27,7 +27,8 @@ jobs:
         auto-update-conda: true
         auto-activate-base: false
         miniconda-version: "latest"
-    - run: |
+    - name: Install Python packages
+      run: |
         conda install gdal
         pip install --upgrade pip
         pip install -e .
