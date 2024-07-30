@@ -28,8 +28,9 @@ jobs:
         auto-update-conda: true
         auto-activate-base: false
         miniconda-version: "latest"
-    - name: Install Python packages
+    - name: Install GDAL from Conda
+      run: conda install gdal
+    - name: Install PyPi packages
       run: |
-        conda install gdal
-        python3 -m pip install --upgrade pip
-        python3 -m pip install -e .
+        pip install --upgrade pip
+        pip install -e .
