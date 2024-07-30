@@ -31,6 +31,4 @@ jobs:
     - name: Install GDAL from Conda
       run: conda install gdal
     - name: Install PyPi packages
-      run: |
-        pip install --upgrade pip
-        pip install -e .
+      run: pip install -e .
