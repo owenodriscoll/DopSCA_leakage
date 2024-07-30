@@ -1,4 +1,4 @@
-![Continuous Integration build in GitHub Actions](https://github.com/owenodriscoll/DopSCA/actions/workflows/main.yml/badge.svg?branch=main)
+![Continuous Integration build in GitHub Actions](https://github.com/owenodriscoll/DopSCA/actions/workflows/main.yaml/badge.svg?branch=main)
 
 Create a cdsapi account to access ERA5 wind-field information
 
