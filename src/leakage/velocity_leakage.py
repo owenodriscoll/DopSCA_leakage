@@ -1,15 +1,15 @@
 import os
 import io
-import sys 
+import sys
 import glob
 import warnings
 import xsar
-import dask  # implicitely loaded 
+import dask  # implicitely loaded
 import copy
 import pyproj
 import xrft
 import random
-import bottleneck # implicitely loaded somewhere
+import bottleneck  # implicitely loaded somewhere
 import numpy as np
 import xarray as xr
 import dask.array as da
@@ -56,15 +56,20 @@ from typing import Callable, Union, List, Dict, Any
 
 
 # constants
-c = 3E8
+c = 3e8
+
 
 def convert_to_0_360(longitude):
     return (longitude + 360) % 360
 
-def decorrelation(tau, T):
-    return np.exp(-(tau/T)**2) # 
 
-def pulse_pair_sigma_v_rodriguez2018(T_pp, T_corr_surface, T_corr_Doppler, SNR, Lambda, N_L = 1, gamma = None):
+def decorrelation(tau, T):
+    return np.exp(-((tau / T) ** 2))  #
+
+
+def pulse_pair_sigma_v_rodriguez2018(
+    T_pp, T_corr_surface, T_corr_Doppler, SNR, Lambda, N_L=1, gamma=None
+):
     """
     Calculates the Pulse pair velocity standard deviation within a resolution cell due to coherence loss
 
@@ -92,27 +97,33 @@ def pulse_pair_sigma_v_rodriguez2018(T_pp, T_corr_surface, T_corr_Doppler, SNR, 
     Scaler of estimates surface velocity standard deviation
 
     """
-    wavenumber = 2 * np.pi / Lambda 
+    wavenumber = 2 * np.pi / Lambda
 
-    gamma_velocity = decorrelation(T_pp, T_corr_Doppler) # eq 6 & 7 Rodriguez (2018), NOTE not valid for squint NOTE assumes Gaussian beam pattern
+    gamma_velocity = decorrelation(
+        T_pp, T_corr_Doppler
+    )  # eq 6 & 7 Rodriguez (2018), NOTE not valid for squint NOTE assumes Gaussian beam pattern
     gamma_temporal = decorrelation(T_pp, T_corr_surface)
     gamma_SNR = SNR / (1 + SNR)
 
     if type(gamma) == type(None):
         gamma = gamma_temporal * gamma_SNR * gamma_velocity
-    
-    variance = (1 / (2*wavenumber*T_pp))**2 / (2*N_L) * (1-gamma**2)/gamma**2 # eq 14 Rodriguez (2018)
+
+    variance = (
+        (1 / (2 * wavenumber * T_pp)) ** 2 / (2 * N_L) * (1 - gamma**2) / gamma**2
+    )  # eq 14 Rodriguez (2018)
 
     return np.sqrt(variance), gamma
 
 
-def mean_along_azimuth(x: xr.DataArray | xr.Dataset, azimuth_dim: str = 'az_idx', skipna: bool = False) -> xr.DataArray | xr.Dataset:
+def mean_along_azimuth(
+    x: xr.DataArray | xr.Dataset, azimuth_dim: str = "az_idx", skipna: bool = False
+) -> xr.DataArray | xr.Dataset:
     """
     integrates input array/dataset along azimuthal beam pattern
 
     Input
     -----
-    x: xr.DataArray | xr.Dataset, 
+    x: xr.DataArray | xr.Dataset,
         array or dataset of arrays which to integrate over beam
     azimuth_dim: str,
         Name of azimuthal dimension over which to integrate beam, default is 'az_idx'
@@ -122,42 +133,44 @@ def mean_along_azimuth(x: xr.DataArray | xr.Dataset, azimuth_dim: str = 'az_idx'
     Return
     ------
     integrated_beam: xr.DataArray | xr.Dataset,
-        input features integrated along the beam's azimuth 
+        input features integrated along the beam's azimuth
     """
 
     integrated_beam = x.mean(dim=azimuth_dim, skipna=skipna)
     return integrated_beam
 
-def angular_projection_factor(inc_original, inc_new = 90) -> float:
+
+def angular_projection_factor(inc_original, inc_new=90) -> float:
     """
     Computes multiplication factor to convert vector from one incidence to new one, e.g. from slant range to horizontal w.r.t. to the surface (if inc_new = 90)
 
     Input
     -----
-    inc_original: float, array-like 
+    inc_original: float, array-like
         incidence angle w.r.t. horizontal of vector, in degrees
-    inc_new: float,array-like 
+    inc_new: float,array-like
         new incidence angle in degrees. Defaults to 0 degrees (horizontal)
 
     Returns
     -------
     factor with which to multiply original vector to find projected vector's magnitude
     """
-    return np.sin(np.deg2rad(inc_new))/np.sin(np.deg2rad(inc_original))
+    return np.sin(np.deg2rad(inc_new)) / np.sin(np.deg2rad(inc_original))
 
-def dop2vel(Doppler, Lambda, angle_incidence, angle_azimuth, degrees = True):
+
+def dop2vel(Doppler, Lambda, angle_incidence, angle_azimuth, degrees=True):
     """
-    Computes velocity corresponding to Doppler shift based on eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming 
+    Computes velocity corresponding to Doppler shift based on eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming
 
     Input
     -----
-    doppler: float, 
+    doppler: float,
         relative frequency shift in Hz of surface or object w.r.t to the other
     Lambda: float,
         Wavelength of radio wave, in m
-    angle_incidence: float, 
+    angle_incidence: float,
         incidence angle, in of wave with surface, degrees or radians
-    angle_azimuth: float, 
+    angle_azimuth: float,
         azimuthal angle with respect to boresight (0 for right looking system)
     degrees: bool,
         whether input angles are provided in degrees or radians
@@ -169,23 +182,26 @@ def dop2vel(Doppler, Lambda, angle_incidence, angle_azimuth, degrees = True):
     """
 
     if degrees:
-        angle_azimuth, angle_incidence = [np.deg2rad(i) for i in [angle_azimuth, angle_incidence]]
+        angle_azimuth, angle_incidence = [
+            np.deg2rad(i) for i in [angle_azimuth, angle_incidence]
+        ]
 
-    return Lambda / 2 * Doppler / ( np.sin(angle_azimuth) * np.sin(angle_incidence))
+    return Lambda / 2 * Doppler / (np.sin(angle_azimuth) * np.sin(angle_incidence))
 
-def vel2dop(velocity, Lambda, angle_incidence, angle_azimuth, degrees = True):
+
+def vel2dop(velocity, Lambda, angle_incidence, angle_azimuth, degrees=True):
     """
-    Computes Doppler shift corresponding to velocity based on eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming 
+    Computes Doppler shift corresponding to velocity based on eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming
 
     Input
     -----
-    velocity: float, 
+    velocity: float,
         relative velocity in m/s of surface or object w.r.t to the other
     Lambda: float,
         Wavelength of radio wave, in m
-    angle_incidence: float, 
+    angle_incidence: float,
         incidence angle, in of wave with surface, degrees or radians
-    angle_azimuth: float, 
+    angle_azimuth: float,
         azimuthal angle with respect to boresight (0 for right looking system)
     degrees: bool,
         whether input angles are provided in degrees or radians
@@ -197,11 +213,19 @@ def vel2dop(velocity, Lambda, angle_incidence, angle_azimuth, degrees = True):
     """
 
     if degrees:
-        angle_azimuth, angle_incidence = [np.deg2rad(i) for i in [angle_azimuth, angle_incidence]]
+        angle_azimuth, angle_incidence = [
+            np.deg2rad(i) for i in [angle_azimuth, angle_incidence]
+        ]
 
     return 2 / Lambda * velocity * np.sin(angle_azimuth) * np.sin(angle_incidence)
 
-def slant2ground(spacing_slant_range: float|int, height: float|int, ground_range_max: float|int, ground_range_min: float|int) -> float:
+
+def slant2ground(
+    spacing_slant_range: float | int,
+    height: float | int,
+    ground_range_max: float | int,
+    ground_range_min: float | int,
+) -> float:
     """
     Converts a slant range pixel spacing to that projected onto the ground (assuming flat earth)
 
@@ -214,8 +238,8 @@ def slant2ground(spacing_slant_range: float|int, height: float|int, ground_range
     ground_range_max: float|int,
         ground range projected maximum distance from satellite
     ground_range_min: float|int,
-        ground range projected minimum distance from satellite  
-    
+        ground range projected minimum distance from satellite
+
     Returns
     -------
     new_grg_pixel: float,
@@ -228,7 +252,7 @@ def slant2ground(spacing_slant_range: float|int, height: float|int, ground_range
     while current_distance > ground_range_min:
         new_grg_pixel.append(current_distance)
         new_incidence = np.arctan(current_distance / height)
-        current_distance -= (spacing_slant_range / np.sin(new_incidence))
+        current_distance -= spacing_slant_range / np.sin(new_incidence)
 
     # reverse order to convert from decreasing to increasing ground ranges
     new_grg_pixel.reverse()
@@ -236,7 +260,13 @@ def slant2ground(spacing_slant_range: float|int, height: float|int, ground_range
     return new_grg_pixel
 
 
-def design_low_pass_filter_2D(da_shape: tuple[int, int], cutoff_frequency: float, fs_x: float, fs_y: float, window: str = 'hann'): 
+def design_low_pass_filter_2D(
+    da_shape: tuple[int, int],
+    cutoff_frequency: float,
+    fs_x: float,
+    fs_y: float,
+    window: str = "hann",
+):
     """
     Design 2D window in time domain given sampling in x- and y-direction and desired cutoff frequency
 
@@ -247,9 +277,9 @@ def design_low_pass_filter_2D(da_shape: tuple[int, int], cutoff_frequency: float
     cutoff_frequency: float,
         threshold frequnecy, greater frequencies are filtered out
     fs_x: float,
-        sampling along first DataArray dimension in tuple 
+        sampling along first DataArray dimension in tuple
     fs_y: float,
-        sampling along first DataArray dimension in tuple 
+        sampling along first DataArray dimension in tuple
     window: str,
         window string from scipy.signal.get_window
 
@@ -258,17 +288,37 @@ def design_low_pass_filter_2D(da_shape: tuple[int, int], cutoff_frequency: float
     filter_response: Array[float],
         2D array with time domain filter response
     """
-    
-    taps_x = firwin(numtaps = da_shape[0], cutoff=cutoff_frequency, fs=fs_x, pass_zero=True, window=window)
-    taps_y = firwin(numtaps = da_shape[1], cutoff=cutoff_frequency, fs=fs_y, pass_zero=True, window=window)
 
-    #generate 2D field
+    taps_x = firwin(
+        numtaps=da_shape[0],
+        cutoff=cutoff_frequency,
+        fs=fs_x,
+        pass_zero=True,
+        window=window,
+    )
+    taps_y = firwin(
+        numtaps=da_shape[1],
+        cutoff=cutoff_frequency,
+        fs=fs_y,
+        pass_zero=True,
+        window=window,
+    )
+
+    # generate 2D field
     filter_response = np.outer(taps_x, taps_y)
-    
-    return filter_response
-    
 
-def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fs_x: float, fs_y: float, window: str = 'hann', fill_nans: bool = False, return_complex: bool = False) -> xr.DataArray:
+    return filter_response
+
+
+def low_pass_filter_2D(
+    da: xr.DataArray,
+    cutoff_frequency: float,
+    fs_x: float,
+    fs_y: float,
+    window: str = "hann",
+    fill_nans: bool = False,
+    return_complex: bool = False,
+) -> xr.DataArray:
     """
     Low pass filtering an xarray dataArray in the Fourier domain using xrft, scipy.signal.windows and np.fft
 
@@ -281,9 +331,9 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fs_x: float, f
     cutoff_frequency: float,
         threshold frequnecy, greater frequencies are filtered out
     fs_x: float,
-        sampling along first DataArray dimension in tuple 
+        sampling along first DataArray dimension in tuple
     fs_y: float,
-        sampling along first DataArray dimension in tuple 
+        sampling along first DataArray dimension in tuple
     window: str,
         window string from scipy.signal.get_window
     fill_nans: bool,
@@ -300,23 +350,29 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fs_x: float, f
     if fill_nans:
         condition_fill = np.isfinite(da)
         da_filled = xr.where(condition_fill, da, 0)
-    else: 
+    else:
         da_filled = da
 
-    # data is rechunked because fourier transform cannot be performed over chunked dimension 
+    # data is rechunked because fourier transform cannot be performed over chunked dimension
     # shift set to false to prevent clashing fftshifts between np.fft and xrft.fft
     if is_chunked_checker(da_filled):
-        da_spec = xrft.fft(da_filled.chunk({**da_filled.sizes}), chunks_to_segmentsbool = False, shift = False)
+        da_spec = xrft.fft(
+            da_filled.chunk({**da_filled.sizes}),
+            chunks_to_segmentsbool=False,
+            shift=False,
+        )
     else:
-        da_spec = xrft.fft(da_filled, shift = False)
+        da_spec = xrft.fft(da_filled, shift=False)
 
     # design time-domain filter
-    filter_response = design_low_pass_filter_2D(da_spec.shape, cutoff_frequency, fs_x=fs_x, fs_y=fs_y, window=window)
+    filter_response = design_low_pass_filter_2D(
+        da_spec.shape, cutoff_frequency, fs_x=fs_x, fs_y=fs_y, window=window
+    )
 
     # convert window to fourier domain and multiply with spectrum, then convert back (i.e. same as convolving filter with input image)
     filter_response_fourier = np.fft.fft2(filter_response)
     da_spec_filt = da_spec * filter_response_fourier
-    da_filt = xrft.ifft(da_spec_filt, shift = False) 
+    da_filt = xrft.ifft(da_spec_filt, shift=False)
 
     if not return_complex:
         da_filt = da_filt.real
@@ -331,7 +387,16 @@ def low_pass_filter_2D(da: xr.DataArray, cutoff_frequency: float, fs_x: float, f
 
     return da_filt
 
-def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fs_x: float, fs_y: float, window: str = 'hann', fill_nans: bool = False, return_complex: bool = False) -> xr.Dataset:
+
+def low_pass_filter_2D_dataset(
+    ds: xr.Dataset,
+    cutoff_frequency: float,
+    fs_x: float,
+    fs_y: float,
+    window: str = "hann",
+    fill_nans: bool = False,
+    return_complex: bool = False,
+) -> xr.Dataset:
     """
     Wrapper of low_pass_filter_2D for each dataArray in dataset
 
@@ -344,9 +409,9 @@ def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fs_x: fl
     cutoff_frequency: float,
         threshold frequnecy, greater frequencies are filtered out
     fs_x: float,
-        sampling along first DataArray dimension in tuple 
+        sampling along first DataArray dimension in tuple
     fs_y: float,
-        sampling along first DataArray dimension in tuple 
+        sampling along first DataArray dimension in tuple
     window: str,
         window string from scipy.signal.get_window
     fill_nans: bool,
@@ -360,23 +425,29 @@ def low_pass_filter_2D_dataset(ds: xr.Dataset, cutoff_frequency: float, fs_x: fl
         The real part of low-pass filtered data
     """
 
-    ds_filt = xr.Dataset({
-        var + '_subscene': low_pass_filter_2D(ds[var], 
-                                              cutoff_frequency = cutoff_frequency, 
-                                              fs_x=fs_x,
-                                              fs_y=fs_y,
-                                              window= window,
-                                              fill_nans = fill_nans,
-                                              return_complex = return_complex,
-                                              ) for var in ds
-        })
+    ds_filt = xr.Dataset(
+        {
+            var
+            + "_subscene": low_pass_filter_2D(
+                ds[var],
+                cutoff_frequency=cutoff_frequency,
+                fs_x=fs_x,
+                fs_y=fs_y,
+                window=window,
+                fill_nans=fill_nans,
+                return_complex=return_complex,
+            )
+            for var in ds
+        }
+    )
 
     return ds_filt
 
+
 def complex_speckle_noise(noise_shape: tuple, random_state: int = 42):
     """
-    Generates complex multiplicative speckle noise 
-    
+    Generates complex multiplicative speckle noise
+
     Intensity is obtained by (abs(speckle_complex)**2)/2, which has a mean and variance of 1
 
     Assumes Gaussian noise for real and imaginary components and uniform phase
@@ -384,44 +455,62 @@ def complex_speckle_noise(noise_shape: tuple, random_state: int = 42):
     np.random.seed(random_state)
     noise_real = np.random.randn(*noise_shape)
     noise_imag = np.random.randn(*noise_shape)
-    speckle = np.array([complex(a,b) for a, b in zip(noise_real.ravel(), noise_imag.ravel())])
+    speckle = np.array(
+        [complex(a, b) for a, b in zip(noise_real.ravel(), noise_imag.ravel())]
+    )
 
     return speckle.reshape(noise_shape)
+
 
 def is_chunked_checker(da: xr.DataArray) -> bool:
     """checks whether inoput datarray is chunked"""
     return da.chunks is not None and any(da.chunks)
 
-def padding_fourier(da: xr.DataArray, padding: int|tuple, dimension: str) -> xr.DataArray:
+
+def padding_fourier(
+    da: xr.DataArray, padding: int | tuple, dimension: str
+) -> xr.DataArray:
     """
     Interpolate data by zero-padding in Fourier domain along dimension
     """
     if is_chunked_checker(da):
         da = da.chunk({**da.sizes})
 
-    da_spec = xrft.fft(da, true_amplitude=False) # set to false for same behaviour as np.fft
-    da_spec_padded = xrft.padding.pad(da_spec, {'freq_' + dimension: padding}, constant_values = complex(0,0))
+    da_spec = xrft.fft(
+        da, true_amplitude=False
+    )  # set to false for same behaviour as np.fft
+    da_spec_padded = xrft.padding.pad(
+        da_spec, {"freq_" + dimension: padding}, constant_values=complex(0, 0)
+    )
 
-    # data is rechunked because Fourier transform cannot be performed over chunked dimension 
+    # data is rechunked because Fourier transform cannot be performed over chunked dimension
     if is_chunked_checker(da_spec_padded):
         da_spec_padded = da_spec_padded.chunk({**da_spec_padded.sizes})
-    
-    da_spec_padded *= da_spec_padded.sizes['freq_' + dimension]/da.sizes[dimension] # multiply times factor to compensate for more samples in Fourier domain
-    da_padded = xrft.ifft(da_spec_padded, true_amplitude=False) # set to false for same behaviour as np.fft
+
+    da_spec_padded *= (
+        da_spec_padded.sizes["freq_" + dimension] / da.sizes[dimension]
+    )  # multiply times factor to compensate for more samples in Fourier domain
+    da_padded = xrft.ifft(
+        da_spec_padded, true_amplitude=False
+    )  # set to false for same behaviour as np.fft
 
     return da_padded
 
-def da_ones_independent_samples(da: xr.DataArray, dim_to_resample: int = 0, samples_per_indepent_sample: int = 2) -> xr.DataArray:
+
+def da_ones_independent_samples(
+    da: xr.DataArray, dim_to_resample: int = 0, samples_per_indepent_sample: int = 2
+) -> xr.DataArray:
     """
     Creates a new datarray filled with ones whose shape corresponds to the number of independent samples, rather than (oversampled) real samples
     """
 
-    dim_interp = 'dim_'+str(dim_to_resample)
+    dim_interp = "dim_" + str(dim_to_resample)
     a = da.shape
     b = np.ones(a)
     c = xr.DataArray(b)
-    d = c.coarsen({dim_interp: samples_per_indepent_sample} ,boundary='trim').mean()
+    d = c.coarsen({dim_interp: samples_per_indepent_sample}, boundary="trim").mean()
     return d
+
 
 def compute_padding_1D(length_desired: int, length_current: int) -> tuple[int, int]:
     """
@@ -429,19 +518,26 @@ def compute_padding_1D(length_desired: int, length_current: int) -> tuple[int, i
     """
     assert length_desired > length_current
     pad_total = length_desired - length_current
-    pad = int(np.ceil(pad_total/2))
+    pad = int(np.ceil(pad_total / 2))
     return pad
 
-def phase_error_gen(coherence, n_samples: Union[int, tuple], theta: float = 0,  n_bins: int = 20001, random_state: Union[float, int, types.NoneType]= None):
+
+def phase_error_gen(
+    coherence,
+    n_samples: Union[int, tuple],
+    theta: float = 0,
+    n_bins: int = 20001,
+    random_state: Union[float, int, types.NoneType] = None,
+):
     """
     1-Look phase-difference probability density function (pdf) from equation 19 in:
     Jong-Sen Lee et al., (1994) "Statistics of phase difference and product magnitude of multi-look processed Gaussian signals"
-    
+
     Input
     -----
     coherence: float,
         coherence of phase difference
-    n_samples: Union[int, tuple], 
+    n_samples: Union[int, tuple],
         Number of samples to generate given as a number or as a shape within a tuple
     theta: float,
         phase offset, in radian
@@ -462,13 +558,16 @@ def phase_error_gen(coherence, n_samples: Union[int, tuple], theta: float = 0,  
 
     psi = np.linspace(-np.pi, np.pi, n_bins)
     beta = coherence * np.cos(psi - theta)
-    pdf = ((1 - coherence**2) * (np.sqrt(1 - beta**2) + beta * (np.pi-(np.arccos(beta))))) / (2 * np.pi * (1 - beta**2)**(1.5))
+    pdf = (
+        (1 - coherence**2) * (np.sqrt(1 - beta**2) + beta * (np.pi - (np.arccos(beta))))
+    ) / (2 * np.pi * (1 - beta**2) ** (1.5))
     samples = np.array(random.choices(population=psi, weights=pdf, k=N))
 
     if type(n_samples) == tuple:
         samples = samples.reshape(target_shape)
 
     return samples
+
 
 @dataclass
 class S1DopplerLeakage:
@@ -521,7 +620,7 @@ class S1DopplerLeakage:
         window size for smoothing coarsened interpolated era5 data
     fill_nan_limit: int,
             Number of continuous missing pixels to fill along azimuth in loaded Sentinel-1 file. Select:
-                - 0 for no filling, 
+                - 0 for no filling,
                 - 1 for filling spurious missing pixels
                 - None for no limit on filling (everything filled)
     random_state: int
@@ -535,73 +634,95 @@ class S1DopplerLeakage:
 
     Sources
     -------
-        "Fois, F., Hoogeboom, P., Le Chevalier, F., & Stoffelen, A. (2015, July). DOPSCAT: A mission concept for a Doppler wind-scatterometer. 
+        "Fois, F., Hoogeboom, P., Le Chevalier, F., & Stoffelen, A. (2015, July). DOPSCAT: A mission concept for a Doppler wind-scatterometer.
             In 2015 IEEE International Geoscience and Remote Sensing Symposium (IGARSS) (pp. 2572-2575). IEEE."
-        "Hoogeboom, P., Stoffelen, A., & Lopez-Dekker, P. (2018, October). DopSCA, Scatterometer-based Simultaneous Ocean Vector Current and 
+        "Hoogeboom, P., Stoffelen, A., & Lopez-Dekker, P. (2018, October). DopSCA, Scatterometer-based Simultaneous Ocean Vector Current and
             Wind Estimation. In 2018 Doppler Oceanography from Space (DOfS) (pp. 1-9). IEEE."
-        "Rostan, F., Ulrich, D., Riegger, S., & Østergaard, A. (2016, July). MetoP-SG SCA wind scatterometer design and performance. In 2016 
+        "Rostan, F., Ulrich, D., Riegger, S., & Østergaard, A. (2016, July). MetoP-SG SCA wind scatterometer design and performance. In 2016
             IEEE International Geoscience and Remote Sensing Symposium (IGARSS) (pp. 7366-7369). IEEE."
 
     """
 
-    filename: Union[str, list] 
-    f0: float = 5.4E9                                                   # Hoogeboom et al,. (2018)
-    z0: float = 824E3                                                   # 823-848 km e.g. in Fois et al,. (2015)
-    antenna_length: float = 3.2                                         # for mid beam, Fois et al,. (2015)
-    antenna_height: float = 0.3                                         # for mid beam, Fois et al,. (2015)
-    antenna_elements: int = 4                                           # for mid beam, Rostan et al,. (2016)
-    antenna_weighting: float = 0.75                                     # ?
-    beam_pattern: str = "sinc"                                          # ?, presumed tapered
-    swath_start_incidence_angle_scat: float = 30                        # custom, valid range of incidence angles is 20-65 degrees, Hoogeboom et al,. (2018) (is this for fore/aft beam or mid?)
-    boresight_elevation_angle_scat: float = 40                          # ?
-    vx_sat: int = 6800                                                  # Hoogeboom et al,. (2018)
-    PRF: int = 4                                                        # PRF per antenna, total PRF is 32 Hz for 6 antennas, Hoogeboom et al,. (2018)
-    SNR: float = 1.0                                                    # Signal to noise ratio, for Pulse Pair is approx 1 on average
-    T_pp: float = 1.15E-4                                               # pulse-pair separation time 
-    az_footprint_cutoff: int = 80_000                                   # custom
-    grid_spacing: int = 75                                              # assuming 150 m ground range resolution, Hoogeboom et al,. (2018)
-    resolution_product: int = 25_000                                    # Hoogeboom et al,. (2018)
-    product_averaging_window: str = 'hann'                              # window available from scipy.signal.get_window
-    era5_directory: str = "" 
-    era5_file: Union[bool, str] = False 
+    filename: Union[str, list]
+    f0: float = 5.4e9  # Hoogeboom et al,. (2018)
+    z0: float = 824e3  # 823-848 km e.g. in Fois et al,. (2015)
+    antenna_length: float = 3.2  # for mid beam, Fois et al,. (2015)
+    antenna_height: float = 0.3  # for mid beam, Fois et al,. (2015)
+    antenna_elements: int = 4  # for mid beam, Rostan et al,. (2016)
+    antenna_weighting: float = 0.75  # ?
+    beam_pattern: str = "sinc"  # ?, presumed tapered
+    swath_start_incidence_angle_scat: float = (
+        30  # custom, valid range of incidence angles is 20-65 degrees, Hoogeboom et al,. (2018) (is this for fore/aft beam or mid?)
+    )
+    boresight_elevation_angle_scat: float = 40  # ?
+    vx_sat: int = 6800  # Hoogeboom et al,. (2018)
+    PRF: int = (
+        4  # PRF per antenna, total PRF is 32 Hz for 6 antennas, Hoogeboom et al,. (2018)
+    )
+    SNR: float = 1.0  # Signal to noise ratio, for Pulse Pair is approx 1 on average
+    T_pp: float = 1.15e-4  # pulse-pair separation time
+    az_footprint_cutoff: int = 80_000  # custom
+    grid_spacing: int = (
+        75  # assuming 150 m ground range resolution, Hoogeboom et al,. (2018)
+    )
+    resolution_product: int = 25_000  # Hoogeboom et al,. (2018)
+    product_averaging_window: str = "hann" 
+    era5_directory: str = ""
+    era5_file: Union[bool, str] = False
     era5_undersample_factor: int = 10
     era5_smoothing_window: Union[types.NoneType, int] = None
     fill_nan_limit: Union[types.NoneType, int] = 1
     random_state: int = 42
     _pulsepair_noise: bool = True
     _speckle_noise: bool = True
-    _interpolator: str = 'linear'
+    _interpolator: str = "linear"
     _gamma_hardcode: Union[types.NoneType, float] = None
-
 
     def __post_init__(self):
 
         self.Lambda = c / self.f0
         self.stride = self.vx_sat / self.PRF
-        self.az_mask_pixels_cutoff = int(self.az_footprint_cutoff/2//self.grid_spacing) 
-        
+        self.az_mask_pixels_cutoff = int(
+            self.az_footprint_cutoff / 2 // self.grid_spacing
+        )
+
         # set smoothing window of era5 based on grid size of loaded S1 data
-        if type(self.era5_smoothing_window) == types.NoneType:                   
-            self.era5_smoothing_window = int((200 / self.grid_spacing) * 15 ) # a bit arbitrary values, but they dont really matter
-            
+        if type(self.era5_smoothing_window) == types.NoneType:
+            self.era5_smoothing_window = int(
+                (200 / self.grid_spacing) * 15
+            )  # a bit arbitrary values, but they dont really matter
+
         # Store attributes in object
         attributes_to_store = copy.deepcopy(self.__dict__)
 
         # If input values are None or Booleans, convert them to string type
-        attributes_to_store_updated = {key: value if value is not None and type(value) is not bool else str(value) for key, value in attributes_to_store.items()}
+        attributes_to_store_updated = {
+            key: value if value is not None and type(value) is not bool else str(value)
+            for key, value in attributes_to_store.items()
+        }
         self.attributes_to_store = attributes_to_store_updated
 
-        # warn if aliasing might occur due to combination of spatial and sampling resolutions 
+        # warn if aliasing might occur due to combination of spatial and sampling resolutions
         if self.stride % self.grid_spacing != 0:
-            warnings.warn("Combination of vx_sat, PRF and grid_spacing may lead to aliasing: (vx_sat / PRF) % grid_spacing != 0")
+            warnings.warn(
+                "Combination of vx_sat, PRF and grid_spacing may lead to aliasing: (vx_sat / PRF) % grid_spacing != 0"
+            )
 
     def open_data(self):
         """
         Open data from a file or a list of files. First check if file can be reloaded
         """
 
-        attrs_to_str = ['start_date', 'stop_date', 'footprint', 'multidataset']
-        vars_to_keep = ['ground_heading', 'time', 'incidence', 'latitude', 'longitude', 'sigma0', 'ground_range_approx']
+        attrs_to_str = ["start_date", "stop_date", "footprint", "multidataset"]
+        vars_to_keep = [
+            "ground_heading",
+            "time",
+            "incidence",
+            "latitude",
+            "longitude",
+            "sigma0",
+            "ground_range_approx",
+        ]
         coords_to_drop = "spatial_ref"
         pol = "VV"
 
@@ -612,33 +733,33 @@ class S1DopplerLeakage:
             if isinstance(filename, str):
                 ref_file = filename
                 unique_ids = find_unique_id(filename)
-                
+
             elif isinstance(filename, list):
                 ref_file = filename[0]
                 unique_ids = [find_unique_id(file) for file in filename]
                 unique_ids.sort()
-                unique_ids = '_'.join(unique_ids)
-                
-            id_end = ref_file.rfind('/') + 1
+                unique_ids = "_".join(unique_ids)
+
+            id_end = ref_file.rfind("/") + 1
             storage_dir = ref_file[:id_end]
-            return storage_dir + unique_ids + f'_res{grid_spacing}.nc' 
+            return storage_dir + unique_ids + f"_res{grid_spacing}.nc"
 
-
-        def find_unique_id(filename, unique_id_length = 4):
+        def find_unique_id(filename, unique_id_length=4):
             """
             Function to find the last four digits (unique ID) of Sentinel-1 naming convention
             """
-            id_start = filename.rfind('_') + 1 
-            return filename[id_start:id_start+unique_id_length]
-        
-        def compute_S1_ground_range(ds: xr.Dataset, c = 3E8) -> xr.DataArray:
-            """"
+            id_start = filename.rfind("_") + 1
+            return filename[id_start : id_start + unique_id_length]
+
+        def compute_S1_ground_range(ds: xr.Dataset, c=3e8) -> xr.DataArray:
+            """ "
             Computes approximate ground range corresponding to elevation angle and slant range travel time
             """
             slant_range_distance = (ds.slant_range_time * c) / 2
-            ground_range_approx = np.sin(np.deg2rad(ds.elevation)) * slant_range_distance
+            ground_range_approx = (
+                np.sin(np.deg2rad(ds.elevation)) * slant_range_distance
+            )
             return ground_range_approx
-
 
         def open_new_file(filename, grid_spacing):
             """
@@ -663,27 +784,32 @@ class S1DopplerLeakage:
                     _file_contents = []
                     for i, file in enumerate(filename):
                         try:
-                            content_partial = xsar.open_dataset(file, resolution=grid_spacing)
+                            content_partial = xsar.open_dataset(
+                                file, resolution=grid_spacing
+                            )
                             _file_contents.append(content_partial)
                             self._successful_files.append(file)
                         except Exception as e:
                             # temporarily stop surpressing warnings
                             sys.stdout = stdout_save
-                            print(f'File {i} did not load properly. \nConsider manually adding file content to _file_contents. File in question: {file} \n Error: {e}')
+                            print(
+                                f"File {i} did not load properly. \nConsider manually adding file content to _file_contents. File in question: {file} \n Error: {e}"
+                            )
                             sys.stdout = output_buffer
 
-                    # concatenate data ensuring that it is sorted by time. 
+                    # concatenate data ensuring that it is sorted by time.
                     data_concatened = xr.concat(_file_contents, dim_concat)
                     data_sorted = data_concatened.sortby(var_sortby)
 
                     # redifine coordinate labels of concatened dimension
                     line_step = data_sorted.line.diff(dim=dim_concat).max()
-                    S1_file = data_sorted.assign_coords(line = line_step.data*np.arange(data_sorted[dim_concat].size))
+                    S1_file = data_sorted.assign_coords(
+                        line=line_step.data * np.arange(data_sorted[dim_concat].size)
+                    )
 
             # Reset system output to saved version
             sys.stdout = stdout_save
             return S1_file
-
 
         storage_name = create_storage_name(self.filename, self.grid_spacing)
 
@@ -695,7 +821,9 @@ class S1DopplerLeakage:
         # else open .SAFE files, process and save as .nc
         else:
             self.S1_file = open_new_file(self.filename, self.grid_spacing)
-            storage_name = create_storage_name(self._successful_files, self.grid_spacing)
+            storage_name = create_storage_name(
+                self._successful_files, self.grid_spacing
+            )
 
             # convert to attributes to ones storeable as .nc
             for attr in attrs_to_str:
@@ -705,10 +833,12 @@ class S1DopplerLeakage:
             self.S1_file = self.S1_file.drop_vars(coords_to_drop)
 
             # keep only VV polarisation
-            self.S1_file = self.S1_file.sel(pol = pol)
+            self.S1_file = self.S1_file.sel(pol=pol)
 
             # compute approximate ground range
-            self.S1_file['ground_range_approx'] = compute_S1_ground_range(ds = self.S1_file, c = c)
+            self.S1_file["ground_range_approx"] = compute_S1_ground_range(
+                ds=self.S1_file, c=c
+            )
 
             # store as .nc file ...
             self.S1_file[vars_to_keep].to_netcdf(storage_name)
@@ -716,17 +846,18 @@ class S1DopplerLeakage:
             # ... and reload
             self.S1_file = xr.open_dataset(storage_name)
 
-            print(f"No pre-saved file found, instead saved loaded file as: {storage_name}")
+            print(
+                f"No pre-saved file found, instead saved loaded file as: {storage_name}"
+            )
         return
-
 
     def querry_era5(self):
         """
-        Opens or downloads relevant ERA5 data to find the wind direction w.r.t. to the radar. 
+        Opens or downloads relevant ERA5 data to find the wind direction w.r.t. to the radar.
         1. Will first attempt to load a specific file (if provided).
-        2. Otherwise will check if previously downloaded file covers area of interest. 
+        2. Otherwise will check if previously downloaded file covers area of interest.
         3. Lastely, will submit new download request.
-        
+
         This method can be skipped by manually providing a "wdir_wrt_sensor" attribute to "self".
         Either an integer/float as an average over the area of interest, or an array, in which case the
         array must be the same shape as the backscatter array in the S1_file.
@@ -740,61 +871,82 @@ class S1DopplerLeakage:
         var_azi = "line"
         var_grg = "sample"
 
-        date = self.S1_file[var_time].min().values.astype('datetime64[m]').astype(object)
+        date = (
+            self.S1_file[var_time].min().values.astype("datetime64[m]").astype(object)
+        )
         date_rounded = round_to_hour(date)
-        yy, mm, dd, hh = date_rounded.year, date_rounded.month, date_rounded.day, date_rounded.hour
+        yy, mm, dd, hh = (
+            date_rounded.year,
+            date_rounded.month,
+            date_rounded.day,
+            date_rounded.hour,
+        )
         time = f"{hh:02}00"
 
         latitudes = self.S1_file[var_lat]
         longitudes = self.S1_file[var_lon]
-        latmean, lonmean = latitudes.mean().values*1, longitudes.mean().values*1
-        latmin, latmax = latitudes.min().values*1, latitudes.max().values*1
-        lonmin, lonmax = longitudes.min().values*1, longitudes.max().values*1
-        lonmin, lonmax = [convert_to_0_360(i) for i in [lonmin, lonmax]] # NOTE correction for fact that ERA5 goes between 0 - 360
+        latmean, lonmean = latitudes.mean().values * 1, longitudes.mean().values * 1
+        latmin, latmax = latitudes.min().values * 1, latitudes.max().values * 1
+        lonmin, lonmax = longitudes.min().values * 1, longitudes.max().values * 1
+        lonmin, lonmax = [
+            convert_to_0_360(i) for i in [lonmin, lonmax]
+        ]  # NOTE correction for fact that ERA5 goes between 0 - 360
 
         if type(self.era5_file) == str:
             era5 = xr.open_dataset(self.era5_file)
         else:
             sub_str = str(yy) + str(mm)
             try:
-                # try to find if monthly data file exists which to load 
-                era5_filename = [s for s in glob.glob(f"{self.era5_directory}*") if sub_str + '.nc' in s][0]
+                # try to find if monthly data file exists which to load
+                era5_filename = [
+                    s
+                    for s in glob.glob(f"{self.era5_directory}*")
+                    if sub_str + ".nc" in s
+                ][0]
             except:
                 #  if not, try to find single estimate hour ERA5 wind file
                 era5_filename = f"era5_{yy}{mm:02d}{dd:02d}h{time}_lat{latmean:.1f}_lon{lonmean:.1f}.nc"
-                era5_filename = era5_filename.replace('.', '_',  2)
+                era5_filename = era5_filename.replace(".", "_", 2)
                 if not self.era5_directory is None:
                     era5_filename = os.path.join(self.era5_directory, era5_filename)
 
                 # if neither monthly file nor hourly single estimate file exist, download new single estimate hour
                 if not os.path.isfile(era5_filename):
-                    era5_wind_area(year = yy,
-                          month = mm,
-                          day = dd,
-                          time = time,
-                          lonmin = lonmin,
-                          lonmax = lonmax,
-                          latmin = latmin,
-                          latmax = latmax,
-                          filename = era5_filename,
-                          )
-            
-            print(f"Loading nearest ERA5 point w.r.t. observation from ERA5 file: {era5_filename}")
+                    era5_wind_area(
+                        year=yy,
+                        month=mm,
+                        day=dd,
+                        time=time,
+                        lonmin=lonmin,
+                        lonmax=lonmax,
+                        latmin=latmin,
+                        latmax=latmax,
+                        filename=era5_filename,
+                    )
+
+            print(
+                f"Loading nearest ERA5 point w.r.t. observation from ERA5 file: {era5_filename}"
+            )
             era5 = xr.open_dataset(era5_filename)
-            
+
         era5_subset_time = era5.sel(
-            time = np.datetime64(date_rounded, 'ns'),
-            method = 'nearest')
+            time=np.datetime64(date_rounded, "ns"), method="nearest"
+        )
 
         era5_subset = era5_subset_time.sel(
-            longitude = convert_to_0_360(self.S1_file[var_lon]),
-            latitude = self.S1_file[var_lat],
-            method = 'nearest')
+            longitude=convert_to_0_360(self.S1_file[var_lon]),
+            latitude=self.S1_file[var_lat],
+            method="nearest",
+        )
 
         # ERA5 data is subsampled
-        # this should not affect resolution much as, for example, the resolution of 1/4 deg ERA5 is approx 50km, 
+        # this should not affect resolution much as, for example, the resolution of 1/4 deg ERA5 is approx 50km,
         # The resampled grid size should still be ~50km (S1 resolution * era5_smoothing_window * era5_undersample_factor ~ 50km)
-        resolution_condition = self.grid_spacing * self.era5_undersample_factor * (1 * self.era5_smoothing_window) # NOTE * 1 because only mean window operations considered
+        resolution_condition = (
+            self.grid_spacing
+            * self.era5_undersample_factor
+            * (1 * self.era5_smoothing_window)
+        )  # NOTE * 1 because only mean window operations considered
 
         # checks whether resampling is unacceptable
         # resolution is ideally twice the grid spacing and 1 degree is approximately 100km
