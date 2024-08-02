@@ -372,7 +372,10 @@ def low_pass_filter_2D(
     # convert window to fourier domain and multiply with spectrum, then convert back (i.e. same as convolving filter with input image)
     filter_response_fourier = np.fft.fft2(filter_response)
     da_spec_filt = da_spec * filter_response_fourier
-    da_filt = xrft.ifft(da_spec_filt, shift=False)
+    lag = [da_spec_filt[d].attrs.get("direct_lag", 0.0) for d in da_spec_filt.dims]
+    da_filt = xrft.ifft(da_spec_filt, 
+                        shift=False,
+                        lag=lag)
 
     if not return_complex:
         da_filt = da_filt.real
@@ -490,8 +493,11 @@ def padding_fourier(
     da_spec_padded *= (
         da_spec_padded.sizes["freq_" + dimension] / da.sizes[dimension]
     )  # multiply times factor to compensate for more samples in Fourier domain
+    lag = [da_spec_padded[d].attrs.get("direct_lag", 0.0) for d in da_spec_padded.dims]
     da_padded = xrft.ifft(
-        da_spec_padded, true_amplitude=False
+        da_spec_padded, 
+        true_amplitude=False,
+        lag = lag
     )  # set to false for same behaviour as np.fft
 
     return da_padded
