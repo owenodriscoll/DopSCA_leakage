@@ -35,6 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ['pytest']
+dev = ['black[jupyter]']
 
 
 [project.urls]
