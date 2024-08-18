@@ -20,6 +20,7 @@ from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 
 from .misc import round_to_hour, angular_difference, calculate_distance, era5_wind_area
 from .add_dca import DCA_helper
+from .conversions import convert_to_0_360, angular_projection_factor, phase2vel, dop2vel, vel2dop, slant2ground
 
 from dataclasses import dataclass
 import types
@@ -58,18 +59,13 @@ from typing import Callable, Union, List, Dict, Any
 # constants
 c = 3e8
 
-
-def convert_to_0_360(longitude):
-    return (longitude + 360) % 360
-
+def dB(x):
+    return 10*np.log10(x)
 
 def decorrelation(tau, T):
     return np.exp(-((tau / T) ** 2))  #
 
-
-def pulse_pair_sigma_v_rodriguez2018(
-    T_pp, T_corr_surface, T_corr_Doppler, SNR, Lambda, N_L=1, gamma=None
-):
+def pulse_pair_coherence(T_pp, T_corr_surface, T_corr_Doppler, SNR):
     """
     Calculates the Pulse pair velocity standard deviation within a resolution cell due to coherence loss
 
@@ -85,19 +81,12 @@ def pulse_pair_sigma_v_rodriguez2018(
         Decorrelation time of velocities within resolution cell as a result of satellite motion during pulse-pair transmit
     SNR : scaler
         Signal to Noise ratio (for pulse-pair system we assume signal to clutter ratio of 1 dominates)
-    Lambda : scaler
-        Wavelength of considered radiowave
-    N_L : int
-        Number of independent looks for given area
-    gamma : scaler
-        coherence in case it should be hard coded
 
     Returns
     -------
-    Scaler of estimates surface velocity standard deviation
+    Scaler of coherence
 
     """
-    wavenumber = 2 * np.pi / Lambda
 
     gamma_velocity = decorrelation(
         T_pp, T_corr_Doppler
@@ -105,14 +94,33 @@ def pulse_pair_sigma_v_rodriguez2018(
     gamma_temporal = decorrelation(T_pp, T_corr_surface)
     gamma_SNR = SNR / (1 + SNR)
 
-    if type(gamma) == type(None):
-        gamma = gamma_temporal * gamma_SNR * gamma_velocity
+    gamma = gamma_temporal * gamma_SNR * gamma_velocity
 
-    variance = (
-        (1 / (2 * wavenumber * T_pp)) ** 2 / (2 * N_L) * (1 - gamma**2) / gamma**2
-    )  # eq 14 Rodriguez (2018)
+    return gamma
 
-    return np.sqrt(variance), gamma
+
+def phase_uncertainty_rodriguez2018(gamma, N_L=1):
+    """
+    Calculates the pulse pair phase variance within a resolution cell due to coherence loss
+    equation 14 of Rodriguez et al (2018) Estimating Ocean Vector Winds and Currents Using a Ka-Band Pencil-Beam Doppler Scatterometer
+    
+    NOTE valid in the high-coherence limit only
+
+    Parameters
+    ----------
+    N_L : int
+        Number of independent looks for given area
+    gamma : scaler
+        coherence
+
+    Returns
+    -------
+    Scaler of estimates surface velocity variance
+    """
+
+    phase_var = 1  / (2 * N_L) * (1 - gamma**2) / gamma**2 
+
+    return phase_var
 
 
 def mean_along_azimuth(
@@ -138,126 +146,6 @@ def mean_along_azimuth(
 
     integrated_beam = x.mean(dim=azimuth_dim, skipna=skipna)
     return integrated_beam
-
-
-def angular_projection_factor(inc_original, inc_new=90) -> float:
-    """
-    Computes multiplication factor to convert vector from one incidence to new one, e.g. from slant range to horizontal w.r.t. to the surface (if inc_new = 90)
-
-    Input
-    -----
-    inc_original: float, array-like
-        incidence angle w.r.t. horizontal of vector, in degrees
-    inc_new: float,array-like
-        new incidence angle in degrees. Defaults to 0 degrees (horizontal)
-
-    Returns
-    -------
-    factor with which to multiply original vector to find projected vector's magnitude
-    """
-    return np.sin(np.deg2rad(inc_new)) / np.sin(np.deg2rad(inc_original))
-
-
-def dop2vel(Doppler, Lambda, angle_incidence, angle_azimuth, degrees=True):
-    """
-    Computes velocity corresponding to Doppler shift based on eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming
-
-    Input
-    -----
-    doppler: float,
-        relative frequency shift in Hz of surface or object w.r.t to the other
-    Lambda: float,
-        Wavelength of radio wave, in m
-    angle_incidence: float,
-        incidence angle, in of wave with surface, degrees or radians
-    angle_azimuth: float,
-        azimuthal angle with respect to boresight (0 for right looking system)
-    degrees: bool,
-        whether input angles are provided in degrees or radians
-
-    Return
-    -------
-    velocity: float,
-        relative velocity in m/s of surface or object w.r.t to the other
-    """
-
-    if degrees:
-        angle_azimuth, angle_incidence = [
-            np.deg2rad(i) for i in [angle_azimuth, angle_incidence]
-        ]
-
-    return Lambda / 2 * Doppler / (np.sin(angle_azimuth) * np.sin(angle_incidence))
-
-
-def vel2dop(velocity, Lambda, angle_incidence, angle_azimuth, degrees=True):
-    """
-    Computes Doppler shift corresponding to velocity based on eq. 4.34 from Digital Procesing of Synthetic Aperture Radar Data by Ian G. Cumming
-
-    Input
-    -----
-    velocity: float,
-        relative velocity in m/s of surface or object w.r.t to the other
-    Lambda: float,
-        Wavelength of radio wave, in m
-    angle_incidence: float,
-        incidence angle, in of wave with surface, degrees or radians
-    angle_azimuth: float,
-        azimuthal angle with respect to boresight (0 for right looking system)
-    degrees: bool,
-        whether input angles are provided in degrees or radians
-
-    Returns
-    -------
-    Doppler: float,
-        frequency shift corresponding to input geometry and velocity, in Hz
-    """
-
-    if degrees:
-        angle_azimuth, angle_incidence = [
-            np.deg2rad(i) for i in [angle_azimuth, angle_incidence]
-        ]
-
-    return 2 / Lambda * velocity * np.sin(angle_azimuth) * np.sin(angle_incidence)
-
-
-def slant2ground(
-    spacing_slant_range: float | int,
-    height: float | int,
-    ground_range_max: float | int,
-    ground_range_min: float | int,
-) -> float:
-    """
-    Converts a slant range pixel spacing to that projected onto the ground (assuming flat earth)
-
-    Input
-    -----
-    spacing_slant_range:  float|int,
-        slant range grid size, in meters
-    height: float | int,
-        height of platform, in meters
-    ground_range_max: float|int,
-        ground range projected maximum distance from satellite
-    ground_range_min: float|int,
-        ground range projected minimum distance from satellite
-
-    Returns
-    -------
-    new_grg_pixel: float,
-        new ground range pixel spacing, in meters
-    """
-    current_distance = ground_range_max
-    new_grg_pixel = []
-
-    # iteratively compute new pixel spacing starting from the maximum extend
-    while current_distance > ground_range_min:
-        new_grg_pixel.append(current_distance)
-        new_incidence = np.arctan(current_distance / height)
-        current_distance -= spacing_slant_range / np.sin(new_incidence)
-
-    # reverse order to convert from decreasing to increasing ground ranges
-    new_grg_pixel.reverse()
-
-    return new_grg_pixel
 
 
 def design_low_pass_filter_2D(
@@ -528,20 +416,20 @@ def compute_padding_1D(length_desired: int, length_current: int) -> tuple[int, i
     return pad
 
 
-def phase_error_gen(
-    coherence,
+def phase_error_generator(
+    gamma,
     n_samples: Union[int, tuple],
     theta: float = 0,
     n_bins: int = 20001,
     random_state: Union[float, int, types.NoneType] = None,
 ):
     """
-    1-Look phase-difference probability density function (pdf) from equation 19 in:
+    generates samples from the 1-Look phase-difference probability density function (pdf) from equation 19 in:
     Jong-Sen Lee et al., (1994) "Statistics of phase difference and product magnitude of multi-look processed Gaussian signals"
 
     Input
     -----
-    coherence: float,
+    gamma: float,
         coherence of phase difference
     n_samples: Union[int, tuple],
         Number of samples to generate given as a number or as a shape within a tuple
@@ -563,9 +451,9 @@ def phase_error_gen(
         N = n_samples
 
     psi = np.linspace(-np.pi, np.pi, n_bins)
-    beta = coherence * np.cos(psi - theta)
+    beta = gamma * np.cos(psi - theta)
     pdf = (
-        (1 - coherence**2) * (np.sqrt(1 - beta**2) + beta * (np.pi - (np.arccos(beta))))
+        (1 - gamma**2) * (np.sqrt(1 - beta**2) + beta * (np.pi - (np.arccos(beta))))
     ) / (2 * np.pi * (1 - beta**2) ** (1.5))
     samples = np.array(random.choices(population=psi, weights=pdf, k=N))
 
@@ -1262,7 +1150,7 @@ class S1DopplerLeakage:
 
         self.data["distance_slant_range"] = calculate_distance(
             x=self.data["distance_ground"], y=self.z0
-        )  # np.sqrt(self.data['distance_ground']**2 + self.z0**2)
+        )  
         self.data["az_angle_wrt_boresight"] = np.arcsin(
             (self.data["distance_az"]) / self.data["distance_slant_range"]
         )  # NOTE arcsin instead of tan as distance_slant_range includes azimuthal angle
@@ -1392,7 +1280,7 @@ class S1DopplerLeakage:
             wavenumber = 2 * np.pi / self.Lambda
 
             # -- calculates average azimuthal beam standard deviation within -3 dB
-            beam_db = 10 * np.log10(self.data.beam)
+            beam_db = dB(self.data.beam)
             beam_3dB = (
                 xr.where((beam_db - beam_db.max(dim="az_idx")) < -3, np.nan, 1)
                 * self.data.az_angle_wrt_boresight
@@ -1400,26 +1288,27 @@ class S1DopplerLeakage:
             sigma_az_angle = beam_3dB.std(dim="az_idx").mean().values * 1
 
             T_corr_Doppler = 1 / (np.sqrt(2) * wavenumber * self.vx_sat * sigma_az_angle)  
-            U = 6  # Average wind speed assumed of 6 m/s
+            U = 6  # Average wind speed assumed of 6 m/s, this matters very little for used parameters
             T_corr_surface = 3.29 * self.Lambda / U
 
             # NOTE assumes no squint
-            # NOTE we do not use this velocity error instead, we calculate that using phase uncerttainties from Lee et al. 1994
-            _, self.gamma = pulse_pair_sigma_v_rodriguez2018(
+            self.gamma = pulse_pair_coherence(
                 T_pp=self.T_pp,
                 T_corr_surface=T_corr_surface,
                 T_corr_Doppler=T_corr_Doppler,
-                SNR=self.SNR,
-                Lambda=self.Lambda,
-                gamma=self._gamma_hardcode,
+                SNR=self.SNR
             )
 
-            phase_uncertainty = phase_error_gen(
+            phase_uncertainty = phase_error_generator(
                 coherence=self.gamma,
                 n_samples=(da_ones_independent.shape),
                 random_state=self.random_state,
             )
-            self.velocity_error = phase_uncertainty / 2 / wavenumber / self.T_pp
+            self.velocity_error = phase2vel(
+                phase=phase_uncertainty, 
+                wavenumber=wavenumber,
+                T=self.T_pp
+            )
 
         else:
             self.velocity_error = 0
