@@ -8,21 +8,21 @@ import dask  # implicitely loaded
 import copy
 import pyproj
 import xrft
-import random
 import bottleneck  # implicitely loaded somewhere
 import numpy as np
 import xarray as xr
 import dask.array as da
-from scipy import stats
-from scipy.signal import firwin
 from stereoid.oceans.GMF.cmod5n import cmod5n_inverse, cmod5n_forward
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
+from dataclasses import dataclass
 
 from .misc import round_to_hour, angular_difference, calculate_distance, era5_wind_area
-from .add_dca import DCA_helper
-from .conversions import convert_to_0_360, angular_projection_factor, phase2vel, dop2vel, vel2dop, slant2ground
+from .utils import mean_along_azimuth
+from .conversions import dB, convert_to_0_360, phase2vel, dop2vel, vel2dop, slant2ground
+from .uncertainties import pulse_pair_coherence, generate_complex_speckle, speckle_intensity, phase_error_generator 
+from .low_pass_filter import low_pass_filter_2D_dataset
+from .frequency_domain_padding import padding_fourier, da_integer_oversample_like, compute_padding_1D
 
-from dataclasses import dataclass
 import types
 from typing import Callable, Union, List, Dict, Any
 
@@ -58,409 +58,6 @@ from typing import Callable, Union, List, Dict, Any
 
 # constants
 c = 3e8
-
-def dB(x):
-    return 10*np.log10(x)
-
-def decorrelation(tau, T):
-    return np.exp(-((tau / T) ** 2))  #
-
-def pulse_pair_coherence(T_pp, T_corr_surface, T_corr_Doppler, SNR):
-    """
-    Calculates the Pulse pair velocity standard deviation within a resolution cell due to coherence loss
-
-    NOTE assumes broadside geometry (non-squinted)
-
-    Parameters
-    ----------
-    T_pp : scaler
-        Intra pulse pair time separation
-    T_corr_surface : scaler
-        Decorrelation time of ocean surface at scales of radio wavelength of interest
-    T_corr_Doppler : scaler
-        Decorrelation time of velocities within resolution cell as a result of satellite motion during pulse-pair transmit
-    SNR : scaler
-        Signal to Noise ratio (for pulse-pair system we assume signal to clutter ratio of 1 dominates)
-
-    Returns
-    -------
-    Scaler of coherence
-
-    """
-
-    gamma_velocity = decorrelation(
-        T_pp, T_corr_Doppler
-    )  # eq 6 & 7 Rodriguez (2018), NOTE not valid for squint NOTE assumes Gaussian beam pattern
-    gamma_temporal = decorrelation(T_pp, T_corr_surface)
-    gamma_SNR = SNR / (1 + SNR)
-
-    gamma = gamma_temporal * gamma_SNR * gamma_velocity
-
-    return gamma
-
-
-def phase_uncertainty_rodriguez2018(gamma, N_L=1):
-    """
-    Calculates the pulse pair phase variance within a resolution cell due to coherence loss
-    equation 14 of Rodriguez et al (2018) Estimating Ocean Vector Winds and Currents Using a Ka-Band Pencil-Beam Doppler Scatterometer
-    
-    NOTE valid in the high-coherence limit only
-
-    Parameters
-    ----------
-    N_L : int
-        Number of independent looks for given area
-    gamma : scaler
-        coherence
-
-    Returns
-    -------
-    Scaler of estimates surface velocity variance
-    """
-
-    phase_var = 1  / (2 * N_L) * (1 - gamma**2) / gamma**2 
-
-    return phase_var
-
-
-def mean_along_azimuth(
-    x: xr.DataArray | xr.Dataset, azimuth_dim: str = "az_idx", skipna: bool = False
-) -> xr.DataArray | xr.Dataset:
-    """
-    integrates input array/dataset along azimuthal beam pattern
-
-    Input
-    -----
-    x: xr.DataArray | xr.Dataset,
-        array or dataset of arrays which to integrate over beam
-    azimuth_dim: str,
-        Name of azimuthal dimension over which to integrate beam, default is 'az_idx'
-    skipna: bool,
-        whether to skip (ignore) nans, default is False
-
-    Return
-    ------
-    integrated_beam: xr.DataArray | xr.Dataset,
-        input features integrated along the beam's azimuth
-    """
-
-    integrated_beam = x.mean(dim=azimuth_dim, skipna=skipna)
-    return integrated_beam
-
-
-def design_low_pass_filter_2D(
-    da_shape: tuple[int, int],
-    cutoff_frequency: float,
-    fs_x: float,
-    fs_y: float,
-    window: str = "hann",
-):
-    """
-    Design 2D window in time domain given sampling in x- and y-direction and desired cutoff frequency
-
-    Input
-    -----
-    da_shape:  tuple[int, int],
-       tuple containing shape of x- and y-dimension like (x_shape, y_shape)
-    cutoff_frequency: float,
-        threshold frequnecy, greater frequencies are filtered out
-    fs_x: float,
-        sampling along first DataArray dimension in tuple
-    fs_y: float,
-        sampling along first DataArray dimension in tuple
-    window: str,
-        window string from scipy.signal.get_window
-
-    Returns
-    -------
-    filter_response: Array[float],
-        2D array with time domain filter response
-    """
-
-    taps_x = firwin(
-        numtaps=da_shape[0],
-        cutoff=cutoff_frequency,
-        fs=fs_x,
-        pass_zero=True,
-        window=window,
-    )
-    taps_y = firwin(
-        numtaps=da_shape[1],
-        cutoff=cutoff_frequency,
-        fs=fs_y,
-        pass_zero=True,
-        window=window,
-    )
-
-    # generate 2D field
-    filter_response = np.outer(taps_x, taps_y)
-
-    return filter_response
-
-
-def low_pass_filter_2D(
-    da: xr.DataArray,
-    cutoff_frequency: float,
-    fs_x: float,
-    fs_y: float,
-    window: str = "hann",
-    fill_nans: bool = False,
-    return_complex: bool = False,
-) -> xr.DataArray:
-    """
-    Low pass filtering an xarray dataArray in the Fourier domain using xrft, scipy.signal.windows and np.fft
-
-    Assumes both x and y have same dimensions
-
-    Input:
-    ------
-    da: xr.DataArray,
-        Data to be filtered
-    cutoff_frequency: float,
-        threshold frequnecy, greater frequencies are filtered out
-    fs_x: float,
-        sampling along first DataArray dimension in tuple
-    fs_y: float,
-        sampling along first DataArray dimension in tuple
-    window: str,
-        window string from scipy.signal.get_window
-    fill_nans: bool,
-        Whether to replace non-finite values (e.g. nans and inifinities) with 0
-    return_complex: bool,
-        Whether the imaginary part should be returned or not
-
-    Returns:
-    --------
-    da_filt: xr.DataArray,
-        The real part of low-pass filtered data
-    """
-
-    if fill_nans:
-        condition_fill = np.isfinite(da)
-        da_filled = xr.where(condition_fill, da, 0)
-    else:
-        da_filled = da
-
-    # data is rechunked because fourier transform cannot be performed over chunked dimension
-    # shift set to false to prevent clashing fftshifts between np.fft and xrft.fft
-    if is_chunked_checker(da_filled):
-        da_spec = xrft.fft(
-            da_filled.chunk({**da_filled.sizes}),
-            chunks_to_segmentsbool=False,
-            shift=False,
-        )
-    else:
-        da_spec = xrft.fft(da_filled, shift=False)
-
-    # design time-domain filter
-    filter_response = design_low_pass_filter_2D(
-        da_spec.shape, cutoff_frequency, fs_x=fs_x, fs_y=fs_y, window=window
-    )
-
-    # convert window to fourier domain and multiply with spectrum, then convert back (i.e. same as convolving filter with input image)
-    filter_response_fourier = np.fft.fft2(filter_response)
-    da_spec_filt = da_spec * filter_response_fourier
-    lag = [da_spec_filt[d].attrs.get("direct_lag", 0.0) for d in da_spec_filt.dims]
-    da_filt = xrft.ifft(da_spec_filt, 
-                        shift=False,
-                        lag=lag)
-
-    if not return_complex:
-        da_filt = da_filt.real
-    if fill_nans:
-        da_filt = da_filt.where(condition_fill.data, np.nan)
-
-    # ensure dimensions after fft match those of input (sometimes rounding errors can occur)
-    # NOTE with shift set to False and no manual fftshift the coordinates appear incorrectly not to match (but is good, I hope)
-    dimensions = [*da.sizes]
-    for dimension in dimensions:
-        da_filt[dimension] = da[dimension]
-
-    return da_filt
-
-
-def low_pass_filter_2D_dataset(
-    ds: xr.Dataset,
-    cutoff_frequency: float,
-    fs_x: float,
-    fs_y: float,
-    window: str = "hann",
-    fill_nans: bool = False,
-    return_complex: bool = False,
-) -> xr.Dataset:
-    """
-    Wrapper of low_pass_filter_2D for each dataArray in dataset
-
-    Assumes both x and y have same dimensions
-
-    Input:
-    ------
-    ds: xr.Dataset,
-        Data to be filtered
-    cutoff_frequency: float,
-        threshold frequnecy, greater frequencies are filtered out
-    fs_x: float,
-        sampling along first DataArray dimension in tuple
-    fs_y: float,
-        sampling along first DataArray dimension in tuple
-    window: str,
-        window string from scipy.signal.get_window
-    fill_nans: bool,
-        Whether to replace non-finite values (e.g. nans and inifinities) with 0
-    return_complex: bool,
-        Whether the imaginary part should be returned or not
-
-    Returns:
-    --------
-    ds_filt: xr.Dataset,
-        The real part of low-pass filtered data
-    """
-
-    ds_filt = xr.Dataset(
-        {
-            var
-            + "_subscene": low_pass_filter_2D(
-                ds[var],
-                cutoff_frequency=cutoff_frequency,
-                fs_x=fs_x,
-                fs_y=fs_y,
-                window=window,
-                fill_nans=fill_nans,
-                return_complex=return_complex,
-            )
-            for var in ds
-        }
-    )
-
-    return ds_filt
-
-
-def complex_speckle_noise(noise_shape: tuple, random_state: int = 42):
-    """
-    Generates complex multiplicative speckle noise
-
-    Intensity is obtained by (abs(speckle_complex)**2)/2, which has a mean and variance of 1
-
-    Assumes Gaussian noise for real and imaginary components and uniform phase
-    """
-    np.random.seed(random_state)
-    noise_real = np.random.randn(*noise_shape)
-    noise_imag = np.random.randn(*noise_shape)
-    speckle = np.array(
-        [complex(a, b) for a, b in zip(noise_real.ravel(), noise_imag.ravel())]
-    )
-
-    return speckle.reshape(noise_shape)
-
-
-def is_chunked_checker(da: xr.DataArray) -> bool:
-    """checks whether inoput datarray is chunked"""
-    return da.chunks is not None and any(da.chunks)
-
-
-def padding_fourier(
-    da: xr.DataArray, padding: int | tuple, dimension: str
-) -> xr.DataArray:
-    """
-    Interpolate data by zero-padding in Fourier domain along dimension
-    """
-    if is_chunked_checker(da):
-        da = da.chunk({**da.sizes})
-
-    da_spec = xrft.fft(
-        da, true_amplitude=False
-    )  # set to false for same behaviour as np.fft
-    da_spec_padded = xrft.padding.pad(
-        da_spec, {"freq_" + dimension: padding}, constant_values=complex(0, 0)
-    )
-
-    # data is rechunked because Fourier transform cannot be performed over chunked dimension
-    if is_chunked_checker(da_spec_padded):
-        da_spec_padded = da_spec_padded.chunk({**da_spec_padded.sizes})
-
-    da_spec_padded *= (
-        da_spec_padded.sizes["freq_" + dimension] / da.sizes[dimension]
-    )  # multiply times factor to compensate for more samples in Fourier domain
-    lag = [da_spec_padded[d].attrs.get("direct_lag", 0.0) for d in da_spec_padded.dims]
-    da_padded = xrft.ifft(
-        da_spec_padded, 
-        true_amplitude=False,
-        lag = lag
-    )  # set to false for same behaviour as np.fft
-
-    return da_padded
-
-
-def da_ones_independent_samples(
-    da: xr.DataArray, dim_to_resample: int = 0, samples_per_indepent_sample: int = 2
-) -> xr.DataArray:
-    """
-    Creates a new datarray filled with ones whose shape corresponds to the number of independent samples, rather than (oversampled) real samples
-    """
-
-    dim_interp = "dim_" + str(dim_to_resample)
-    a = da.shape
-    b = np.ones(a)
-    c = xr.DataArray(b)
-    d = c.coarsen({dim_interp: samples_per_indepent_sample}, boundary="trim").mean()
-    return d
-
-
-def compute_padding_1D(length_desired: int, length_current: int) -> tuple[int, int]:
-    """
-    Computes how much to pad on both sides of 1D dimension to obtain desired length
-    """
-    assert length_desired > length_current
-    pad_total = length_desired - length_current
-    pad = int(np.ceil(pad_total / 2))
-    return pad
-
-
-def phase_error_generator(
-    gamma,
-    n_samples: Union[int, tuple],
-    theta: float = 0,
-    n_bins: int = 20001,
-    random_state: Union[float, int, types.NoneType] = None,
-):
-    """
-    generates samples from the 1-Look phase-difference probability density function (pdf) from equation 19 in:
-    Jong-Sen Lee et al., (1994) "Statistics of phase difference and product magnitude of multi-look processed Gaussian signals"
-
-    Input
-    -----
-    gamma: float,
-        coherence of phase difference
-    n_samples: Union[int, tuple],
-        Number of samples to generate given as a number or as a shape within a tuple
-    theta: float,
-        phase offset, in radian
-    n_bins: int,
-        Number of discrete bins to generate pdf
-    random_state: Union[int, float, types.NoneType],
-        Fixes random state if float or int is provided
-    """
-
-    if type(random_state) is not type(None):
-        random.seed(random_state)
-
-    if type(n_samples) == tuple:
-        target_shape = n_samples
-        N = np.prod(target_shape)
-    else:
-        N = n_samples
-
-    psi = np.linspace(-np.pi, np.pi, n_bins)
-    beta = gamma * np.cos(psi - theta)
-    pdf = (
-        (1 - gamma**2) * (np.sqrt(1 - beta**2) + beta * (np.pi - (np.arccos(beta))))
-    ) / (2 * np.pi * (1 - beta**2) ** (1.5))
-    samples = np.array(random.choices(population=psi, weights=pdf, k=N))
-
-    if type(n_samples) == tuple:
-        samples = samples.reshape(target_shape)
-
-    return samples
 
 
 @dataclass
@@ -646,7 +243,7 @@ class S1DopplerLeakage:
             return filename[id_start : id_start + unique_id_length]
 
         def compute_S1_ground_range(ds: xr.Dataset, c=3e8) -> xr.DataArray:
-            """ "
+            """
             Computes approximate ground range corresponding to elevation angle and slant range travel time
             """
             slant_range_distance = (ds.slant_range_time * c) / 2
@@ -1271,8 +868,8 @@ class S1DopplerLeakage:
         shape_ref = self.data[reference].shape
 
         # assumes data along resample dim is oversampled by a factor 2, such that there are two samples per independent sample resolution
-        da_ones_independent = da_ones_independent_samples(
-            self.data[reference], dim_to_resample=0, samples_per_indepent_sample=2
+        da_ones_independent = da_integer_oversample_like(
+            self.data[reference], dim_to_resample=0, new_samples_per_original_sample=2
         )
 
         # add pulse pair velocity uncertainty
@@ -1300,10 +897,11 @@ class S1DopplerLeakage:
             )
 
             phase_uncertainty = phase_error_generator(
-                coherence=self.gamma,
+                gamma=self.gamma,
                 n_samples=(da_ones_independent.shape),
                 random_state=self.random_state,
             )
+            
             self.velocity_error = phase2vel(
                 phase=phase_uncertainty, 
                 wavenumber=wavenumber,
@@ -1392,10 +990,10 @@ class S1DopplerLeakage:
             )
 
             shape_ref = nrcs_scat_slrg.shape
-            da_ones_independent = da_ones_independent_samples(
-                nrcs_scat_slrg, dim_to_resample=0, samples_per_indepent_sample=2
+            da_ones_independent = da_integer_oversample_like(
+                nrcs_scat_slrg, dim_to_resample=0, new_samples_per_original_sample=2
             )
-            speckle_c = complex_speckle_noise(
+            speckle_c = generate_complex_speckle(
                 da_ones_independent.shape, random_state=self.random_state
             )
             da_speckle_c = speckle_c * da_ones_independent
@@ -1416,7 +1014,7 @@ class S1DopplerLeakage:
             self.da_speckle_c_padded_cut = da_speckle_c_padded_cut
 
             # compute real speckle and add to and add speckle
-            speckle = abs(da_speckle_c_padded_cut) ** 2 / 2
+            speckle = speckle_intensity(da_speckle_c_padded_cut)
             nrcs_scat_speckle_slrg = nrcs_scat_slrg * speckle.data
 
             # interpolate to grg
@@ -1511,115 +1109,3 @@ class S1DopplerLeakage:
         return
 
 
-def add_dca_to_leakage_class(cls: S1DopplerLeakage, files_dca) -> None:
-    """function to add computed dca to S1DopplerLeakage class"""
-
-    obj_copy = copy.deepcopy(cls)
-
-    dca_interp, wb_interp = DCA_helper(
-        filenames=files_dca,
-        latitudes=obj_copy.S1_file.latitude.values,
-        longitudes=obj_copy.S1_file.longitude.values,
-    ).add_dca()
-
-    # add interpolated DCA to S1 file
-    obj_copy.S1_file["dca"] = (["azimuth_time", "ground_range"], dca_interp)
-    obj_copy.S1_file["wb"] = (["azimuth_time", "ground_range"], wb_interp)
-    obj_copy.create_dataset()
-    obj_copy.data["dca_s1"] = (["az", "grg"], obj_copy.S1_file["dca"].data)
-    obj_copy.data["wb_s1"] = (["az", "grg"], obj_copy.S1_file["wb"].data)
-    obj_copy.create_beam_mask()
-    obj_copy.data = obj_copy.data.astype("float32")
-
-    reprojection_factor = angular_projection_factor(
-        inc_original=cls.data["inc"], inc_new=cls.data["inc_scatt_eqv"]
-    )
-
-    obj_copy.data["dca_scatt"] = obj_copy.data["dca_s1"] * reprojection_factor
-    obj_copy.data["wb_scatt"] = obj_copy.data["wb_s1"] * reprojection_factor
-
-    cls.data[["dca", "wb"]] = (
-        obj_copy.data[["dca_scatt", "wb_scatt"]] * cls.data["weight"]
-    ) 
-    cls.data[["dca_pulse_rg", "wb_pulse_rg"]] = mean_along_azimuth(
-        cls.data[["dca", "wb"]]
-    )
-    cls.data["doppler_w_dca"] = (
-        obj_copy.data["dca_scatt"] + cls.data["dop_geom"]
-    ) * cls.data[
-        "weight"
-    ]  
-    cls.data["doppler_w_dca_pulse_rg"] = mean_along_azimuth(cls.data["doppler_w_dca"])
-
-    cls.data = cls.data.astype("float32")
-
-    cls.data[["V_dca", "V_wb"]] = dop2vel(
-        Doppler=cls.data[["dca", "wb"]],
-        Lambda=cls.Lambda,
-        angle_incidence=cls.data["inc_scatt_eqv"],
-        angle_azimuth=90,  # the geometric doppler is interpreted as radial motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
-        degrees=True,
-    )
-    cls.data[["V_dca_pulse_rg", "V_wb_pulse_rg"]] = mean_along_azimuth(
-        cls.data[["V_dca", "V_wb"]]
-    )
-
-    cls.data["V_doppler_w_dca"] = dop2vel(
-        Doppler=cls.data["doppler_w_dca"],
-        Lambda=cls.Lambda,
-        angle_incidence=cls.data["inc_scatt_eqv"],
-        angle_azimuth=90,  # the geometric doppler is interpreted as radial motion, so azimuth angle component must result in value of 1 (i.e. pi/2 or 90 deg)
-        degrees=True,
-    )
-
-    cls.data["V_doppler_w_dca_pulse_rg"] = mean_along_azimuth(
-        cls.data["V_doppler_w_dca"]
-    )
-
-    # convert computed avriables from slant to ground range resolution prior to spatial averaging
-    grg_for_safekeeping = cls.data.grg
-    vars_slant2ground = [
-        "wb",
-        "wb_pulse_rg",
-        "dca",
-        "dca_pulse_rg",
-        "doppler_w_dca",
-        "doppler_w_dca_pulse_rg",
-        "V_wb",
-        "V_dca",
-        "V_dca_pulse_rg",
-        "V_wb_pulse_rg",
-        "V_doppler_w_dca",
-    ]
-    temp = cls.data[vars_slant2ground].interp(grg=cls.new_grg_pixel, method="linear")
-    cls.data[vars_slant2ground] = temp.interp(grg=grg_for_safekeeping, method="linear")
-
-    # perform averaging as prescribed in cls
-    scenes_to_average = [
-        "wb_pulse_rg",
-        "V_wb_pulse_rg",
-        "dca_pulse_rg",
-        "doppler_w_dca_pulse_rg",
-        "V_dca_pulse_rg",
-        "V_doppler_w_dca_pulse_rg",
-    ]
-    scenes_averaged = [i + "_subscene" for i in scenes_to_average]
-
-    # NOTE here we confusingly switch the definitions of fs_x and fs_y because the coordinates of loaded Doppler data follows a different order
-    fs_x, fs_y = 1 / cls.stride, 1 / cls.grid_spacing
-    data_lowpass = low_pass_filter_2D_dataset(
-        cls.data[scenes_to_average],
-        cutoff_frequency=1 / (cls.resolution_product),
-        fs_x=fs_x,
-        fs_y=fs_y,
-        window=cls.product_averaging_window,
-        fill_nans=True,
-    )
-    cls.data[scenes_averaged] = data_lowpass
-
-    # a bit of reschuffling of coordinates
-    cls.data = cls.data.transpose("az_idx", "grg", "slow_time").chunk("auto")
-    cls.data[scenes_to_average + scenes_averaged] = cls.data[
-        scenes_to_average + scenes_averaged
-    ].persist()
-    return

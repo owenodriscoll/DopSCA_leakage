@@ -1,6 +1,6 @@
 [project]
 name = "dopsca"
-dynamic = ["version"]
+version = "0.1.0"
 authors = [
   { name="Owen O'D"},
 ]

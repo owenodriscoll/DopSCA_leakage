@@ -1,6 +1,10 @@
 import numpy as np
 
 
+def dB(x):
+    return 10*np.log10(x)
+
+
 def convert_to_0_360(longitude):
     return (longitude + 360) % 360
 
