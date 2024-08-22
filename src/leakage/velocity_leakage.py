@@ -18,6 +18,15 @@ from .misc import round_to_hour, angular_difference, calculate_distance, era5_wi
 from .add_dca import DCA_helper
 
 from dataclasses import dataclass
+
+from .misc import round_to_hour, angular_difference, calculate_distance, era5_wind_area
+from .utils import mean_along_azimuth
+from .conversions import dB, convert_to_0_360, phase2vel, dop2vel, vel2dop, slant2ground
+from .cmod_utils import wrapper_nrcs2wind, wrapper_wind2nrcs
+from .uncertainties import pulse_pair_coherence, generate_complex_speckle, speckle_intensity, phase_error_generator 
+from .low_pass_filter import low_pass_filter_2D_dataset
+from .frequency_domain_padding import padding_fourier, da_integer_oversample_like, compute_padding_1D
+
 import types
 from typing import Callable, Union, List, Dict, Any
 
@@ -280,18 +289,24 @@ class S1DopplerLeakage:
     random_state: int = 42
     _pulsepair_noise: bool = True
     _speckle_noise: bool = True
-
+    _interpolator: str = "linear"
+    _gamma_hardcode: Union[types.NoneType, float] = None
+    _dtype_compress: str = "float32"
 
     def __post_init__(self):
 
-        self.Lambda = c / self.f0 # m
-        self.stride = self.vx_sat / self.PRF
-        self.az_mask_pixels_cutoff = int(self.az_footprint_cutoff/2//self.grid_spacing) 
-        self.grg_N = int(self.resolution_product // self.grid_spacing)           # number of fast-time samples to average to scene size
-        self.slow_time_N = int(self.resolution_product // self.stride)           # number of slow-time samples to average to scene size
-        if type(self.era5_smoothing_window) == types.NoneType:                   # set smoothing window of era5 based on grid size of loaded S1 data
-            self.era5_smoothing_window = int((200 / self.grid_spacing) * 15 )
-            
+        self.Lambda = c / self.f0
+        # self.stride = self.vx_sat / self.PRF
+        self.az_mask_pixels_cutoff = int(
+            self.az_footprint_cutoff / 2 // self.grid_spacing
+        )
+
+        # set smoothing window of era5 based on grid size of loaded S1 data
+        if type(self.era5_smoothing_window) == types.NoneType:
+            self.era5_smoothing_window = int(
+                (200 / self.grid_spacing) * 15
+            )  # a bit arbitrary values, but they dont really matter
+
         # Store attributes in object
         attributes_to_store = copy.deepcopy(self.__dict__)
 
@@ -299,9 +314,11 @@ class S1DopplerLeakage:
         attributes_to_store_updated = {key: value if value is not None and type(value) is not bool else str(value) for key, value in attributes_to_store.items()}
         self.attributes_to_store = attributes_to_store_updated
 
-        # warn if aliasing might occur due to combination of spatial and sampling resolutions 
-        if self.stride % self.grid_spacing != 0:
-            warnings.warn("Combination of vx_sat, PRF and grid_spacing may lead to aliasing: (vx_sat / PRF) % grid_spacing != 0")
+        # # warn if aliasing might occur due to combination of spatial and sampling resolutions
+        # if self.stride % self.grid_spacing != 0:
+        #     warnings.warn(
+        #         "Combination of vx_sat, PRF and grid_spacing may lead to aliasing: (vx_sat / PRF) % grid_spacing != 0"
+        #     )
 
     @staticmethod
     def convert_to_0_360(longitude):
@@ -454,7 +471,7 @@ class S1DopplerLeakage:
         # reload file if possible
         if os.path.isfile(storage_name):
             print(f"Associated file found and reloaded: {storage_name}")
-            self.S1_file = xr.open_dataset(storage_name)
+            self.S1_file = xr.open_dataset(storage_name)#, chunks="auto")
 
         # else open .SAFE files, process and save as .nc
         else:
@@ -475,7 +492,7 @@ class S1DopplerLeakage:
             self.S1_file[vars_to_keep].to_netcdf(storage_name)
 
             # ... and reload
-            self.S1_file = xr.open_dataset(storage_name)
+            self.S1_file = xr.open_dataset(storage_name)#, chunks="auto")
 
             print(f"No pre-saved file found, instead saved loaded file as: {storage_name}")
         return
@@ -499,17 +516,21 @@ class S1DopplerLeakage:
         var_azi = "line"
         var_grg = "sample"
 
-        date = self.S1_file[var_time].min().values.astype('datetime64[m]').astype(object)
+        date = (
+            self.S1_file[var_time].values.min().astype("datetime64[m]").astype(object)
+        )
         date_rounded = round_to_hour(date)
         yy, mm, dd, hh = date_rounded.year, date_rounded.month, date_rounded.day, date_rounded.hour
         time = f"{hh:02}00"
 
         latitudes = self.S1_file[var_lat]
         longitudes = self.S1_file[var_lon]
-        latmean, lonmean = latitudes.mean().values*1, longitudes.mean().values*1
-        latmin, latmax = latitudes.min().values*1, latitudes.max().values*1
-        lonmin, lonmax = longitudes.min().values*1, longitudes.max().values*1
-        lonmin, lonmax = [self.convert_to_0_360(i) for i in [lonmin, lonmax]] # NOTE correction for fact that ERA5 goes between 0 - 360
+        latmean, lonmean = latitudes.values.mean() * 1, longitudes.values.mean() * 1
+        latmin, latmax = latitudes.values.min() * 1, latitudes.values.max() * 1
+        lonmin, lonmax = longitudes.values.min() * 1, longitudes.values.max() * 1
+        lonmin, lonmax = [
+            convert_to_0_360(i) for i in [lonmin, lonmax]
+        ]  # NOTE correction for fact that ERA5 goes between 0 - 360
 
         if type(self.era5_file) == str:
             era5 = xr.open_dataset(self.era5_file)
@@ -572,9 +593,19 @@ class S1DopplerLeakage:
         era5_placeholder = era5_subset.assign_coords({var_azi:azimuth_time_placeholder, var_grg:ground_range_placeholder})
 
         # Subsample the dataset by interpolation
-        new_azimuth_time = np.arange(era5_subset.sizes[var_azi]/self.era5_undersample_factor) * self.era5_undersample_factor
-        new_ground_range = np.arange(era5_subset.sizes[var_grg]/self.era5_undersample_factor) * self.era5_undersample_factor
-        era5_subsamp = era5_placeholder.interp({var_azi:new_azimuth_time, var_grg:new_ground_range}, method='linear')
+        new_azimuth_time = (
+            np.arange(era5_subset.sizes[var_azi] / self.era5_undersample_factor)
+            * self.era5_undersample_factor
+        )
+        new_ground_range = (
+            np.arange(era5_subset.sizes[var_grg] / self.era5_undersample_factor)
+            * self.era5_undersample_factor
+        )
+
+        era5_placeholder = era5_placeholder#.chunk("auto")
+        era5_subsamp = era5_placeholder.interp(
+            {var_azi: new_azimuth_time, var_grg: new_ground_range}, method="linear"
+        )
 
         # first perform median filter (performs better if anomalies are present),then mean filter to smooth edges
         era5_smoothed = era5_subsamp.rolling({var_azi : self.era5_smoothing_window, var_grg : self.era5_smoothing_window}, center = True, min_periods=2).median()
@@ -622,9 +653,15 @@ class S1DopplerLeakage:
 
         # calculate new ground range and azimuth range belonging to observation with scatterometer viewing geometry
         grg_offset = np.tan(np.deg2rad(self.swath_start_incidence_angle_scat)) * self.z0
-        grg = np.arange(self.S1_file[var_nrcs].data.shape[1]) * self.grid_spacing + grg_offset
-        az = (np.arange(self.S1_file[var_nrcs].data.shape[0]) - self.S1_file[var_nrcs].data.shape[0]//2) * self.grid_spacing
-        x_sat = np.arange(az.min(), az.max(), self.stride)
+        grg = (
+            np.arange(self.S1_file[var_nrcs].data.shape[1]) * self.grid_spacing
+            + grg_offset
+        )
+        az = (
+            np.arange(self.S1_file[var_nrcs].data.shape[0])
+            - self.S1_file[var_nrcs].data.shape[0] // 2
+        ) * self.grid_spacing
+        # x_sat = np.arange(az.min(), az.max(), self.stride)
 
         # create new dataset 
         data = xr.Dataset(
@@ -640,15 +677,23 @@ class S1DopplerLeakage:
                 grid_spacing = self.grid_spacing),
         )
 
+        # data = data.astype(self._dtype_compress).chunk("auto")
+        # data = data.chunk("auto")
+
         # find points with nan's or poor backscatter estimates
         # condition_pre = data['nrcs'].isnull()
         condition_to_fix = ((data['nrcs'].isnull()) | (data['nrcs'] <= 0))
         data['nrcs'] = data['nrcs'].where(~condition_to_fix)
 
         # fill nans using limit, limit = 1 fills only single missing pixels,limit = None fill all, limit = 0 filters nothing, not consistent missing data
-        interpolater = lambda x: x.interpolate_na(dim = dim_az, method= 'linear', limit= self.fill_nan_limit, fill_value= 'extrapolate')
-        data['nrcs'] = interpolater(data['nrcs'])
-        conditions_post = ((data['nrcs'].isnull()) |(data['nrcs'] <= 0))
+        interpolater = lambda x: x.interpolate_na(
+            dim=dim_az,
+            method="linear",
+            limit=self.fill_nan_limit,
+            fill_value="extrapolate",
+        )
+        data["nrcs"] = interpolater(data["nrcs"]) #.chunk({dim_az:-1, dim_grg:"auto"})) # rechunk for dask
+        conditions_post = (data["nrcs"].isnull()) | (data["nrcs"] <= 0)
 
         # add windfield
         if isinstance(self.wdir_wrt_sensor, xr.DataArray):
@@ -657,17 +702,24 @@ class S1DopplerLeakage:
             data['wdir_wrt_sensor'] = ([dim_az, dim_grg], np.ones_like(data['nrcs']) * self.wdir_wrt_sensor)
         windfield = cmod5n_inverse(data["nrcs"].data, data['wdir_wrt_sensor'].data, data["inc"].data)
 
-        data['windfield'] = ([dim_az, dim_grg], windfield)
-        data["windfield"] = data["windfield"].assign_attrs(units= 'm/s', description = 'CMOD5n Windfield for Sentinel-1 backscatter')
+        # data = data.chunk("auto")
+
+        # compute wind field
+        # data["windfield"] = (data.nrcs.dims, da.empty_like(data.nrcs))
+        data = wrapper_nrcs2wind(data) #data.map_blocks(wrapper_nrcs2wind)#, template=data)
+        data["windfield"] = data["windfield"].assign_attrs(
+            units="m/s", description="CMOD5n Windfield for Sentinel-1 backscatter"
+        )
 
         # Remove data that, even after filling, does not meet criteria
         data = data.where(~(conditions_post))
 
-        # add another dimension for later use
-        x_sat = da.arange(data[dim_az].min(), data[dim_az].max(), self.stride)
-        slow_time = self.stride * da.arange(x_sat.shape[0])
-        x_sat = xr.DataArray(x_sat, dims='slow_time', coords={'slow_time': slow_time})
-        data = data.assign(x_sat=x_sat)
+        # # add another dimension for later use
+        # self.stride = 1800
+        # x_sat = da.arange(data[dim_az].min(), data[dim_az].max(), self.stride)
+        # slow_time = self.stride * da.arange(x_sat.shape[0])
+        # self.x_sat = xr.DataArray(x_sat, dims="slow_time", coords={"slow_time": slow_time})
+        # data = data.assign(x_sat=x_sat)
 
         # update with previously stored data
         data.attrs.update(self.attributes_to_store)
@@ -682,85 +734,118 @@ class S1DopplerLeakage:
         Creates a new stack of (potentially overlapping) observations centered on a new azimuthmul coordinate system
         """
 
-        # find indexes along azimuth with beam beam center NOTE does not work for squinted geometries
-        beam_center = abs(self.data['x_sat'] - self.data['az']).argmin(dim=['az'])['az'].values 
+        # # find indexes along azimuth with beam beam center NOTE does not work for squinted geometries
+        # beam_center = (
+        #     abs(self.data["x_sat"] - self.data["az"]).argmin(dim=["az"])["az"].values
+        # )
 
-        # find indxes within allowed beam with over slow time
-        masks = []
-        lengths = []
-        for i in beam_center:
-            mask = np.zeros_like(self.data['az'])  # create a mask
-            lower_limit = np.where(i-self.az_mask_pixels_cutoff < 0, 0, i-self.az_mask_pixels_cutoff)
-            mask[lower_limit:i+self.az_mask_pixels_cutoff+1] = 1
-            idx_valid = np.argwhere(mask).squeeze()
-            lengths.append(idx_valid.shape[0])
-            masks.append(idx_valid)
+        # # find indxes within allowed beam with over slow time
+        # masks = []
+        # lengths = []
+        # for i in beam_center:
+        #     mask = np.zeros_like(self.data["az"])  # create a mask
+        #     lower_limit = np.where(
+        #         i - self.az_mask_pixels_cutoff < 0, 0, i - self.az_mask_pixels_cutoff
+        #     )
+        #     mask[lower_limit : i + self.az_mask_pixels_cutoff + 1] = 1
+        #     idx_valid = np.argwhere(mask).squeeze()
+        #     lengths.append(idx_valid.shape[0])
+        #     masks.append(idx_valid)
 
-        # determine which slow-time observations occur at the edges of the scenes, to filter out
-        l = np.array(lengths)
-        l_max = l.max()
-        idx_slow_time = np.argwhere(l==l_max).squeeze()
-        self.idx_slow_time = idx_slow_time
+        # # determine which slow-time observations occur at the edges of the scenes, to filter out
+        # l = np.array(lengths)
+        # l_max = l.max()
+        # idx_slow_time = np.argwhere(l == l_max).squeeze()
+        # # self.idx_slow_time = idx_slow_time
 
-        # prepare clipping indixes outside beam pattern
-        _data = []
+        # # prepare clipping indixes outside beam pattern
+        # _data = []
+        # dim_filter = "az"
+        # dim_new = "az_idx"
+        # dim_new_res = self.data.attrs["grid_spacing"]
+
+        # # array with azimuth indexes to select over slow time
+        # idx_az = np.array([masks[i] for i in idx_slow_time])
+        # self.idx_az = idx_az
+
+        # # prepare data by chunking and conversion to lower bit
+        # self.data = self.data.astype(self._dtype_compress).chunk("auto")
+
+        # # this loop is an ugly way of sliding and subsetting along azimuth
+        # for i, st in enumerate(idx_slow_time):
+
+        #     a = self.data.isel(slow_time=st, az=idx_az[i])
+        #     a = a.assign_coords(
+        #         {dim_new: (dim_filter, dim_new_res * np.arange(a.sizes[dim_filter]))}
+        #     )
+        #     a = a.swap_dims({dim_filter: dim_new})
+        #     a = a.reset_coords(names=dim_filter)
+
+        #     _data.append(a)
+
+        # self.data = xr.concat(_data, dim="slow_time")
+
         dim_filter = "az"
-        dim_new = "az_idx"
-        dim_new_res = self.data.attrs['grid_spacing']
+        dim_new = "slow_time"
+        dim_window = "az_idx"
 
-        # array with azimuth indexes to select over slow time
-        idx_az = np.array([masks[i] for i in idx_slow_time])
-        self.idx_az = idx_az
+        self.window_size = np.round(self.az_footprint_cutoff / self.grid_spacing).astype("int")
+        self.stride_elements = np.round(self.vx_sat / self.PRF / self.grid_spacing).astype("int")
 
-        # prepare data by chunking and conversion to lower bit
-        self.data = self.data.astype('float32').chunk('auto')
-        for i, st in enumerate(idx_slow_time):
+        self.data = self.data.rolling({dim_filter: self.window_size}, center=True).construct({dim_filter:dim_window}, stride=self.stride_elements)
+        stride = (self.data[dim_filter][-1] - self.data[dim_filter][0]) / (self.data[dim_filter].sizes[dim_filter]-1)
+        self.stride = float(stride.data)
+        slow_time = np.arange(self.data[dim_filter].sizes[dim_filter]) * self.stride
 
-            a = self.data.isel(slow_time = st, az = idx_az[i])
-            a = a.assign_coords({dim_new: (dim_filter, dim_new_res*np.arange(a.sizes[dim_filter]))})
-            a = a.swap_dims({dim_filter:dim_new})
-            a = a.reset_coords(names=dim_filter)
+        self.data = self.data.assign_coords(
+                        {dim_new: (dim_filter, slow_time),
+                        dim_window: (self.data[dim_window] * self.grid_spacing)}
+                    )
+        self.data = self.data.swap_dims({dim_filter: dim_new})
+        self.data = self.data.reset_coords(names=dim_filter)
 
-            _data.append(a)
+        delta = 1E-10
+        self.to_clip = np.round(self.window_size/self.stride_elements + delta, 0).astype(int)
+        self.start_idx = np.round(self.to_clip / 2).astype(int)
+        self.end_idx = (self.to_clip - self.start_idx).astype(int)
+        self.data = self.data.isel({dim_new : slice(self.start_idx, -self.end_idx)})
 
-        self.data = xr.concat(_data, dim = 'slow_time')
-        return 
-    
+
+        # -------
+        # x_sat = da.arange(self.data[dim_az].min(), data[dim_az].max(), self.stride)
+        # slow_time = self.stride * da.arange(x_sat.shape[0])
+        # self.x_sat = xr.DataArray(x_sat, dims="slow_time", coords={"slow_time": slow_time})
+
+        return
 
     def compute_scatt_eqv_backscatter(self):
         """
         From the submitted viewing geometry, calculates the nrcs as would be observed by the scatterometer
         """
 
-        self.data['distance_az'] = (self.data["az"] - self.data["x_sat"]).isel(slow_time = 0)
-        self.data['distance_ground'] = calculate_distance(x = self.data['distance_az'], y = self.data["grg"]) 
-        self.data['inc_scatt_eqv'] = np.rad2deg(np.arctan(self.data['distance_ground']/self.z0))
-        slow_time_vector = self.data.slow_time
-        self.data['inc_scatt_eqv_cube'] = self.data['inc_scatt_eqv'].expand_dims(dim={"slow_time": slow_time_vector})
+        # self.data["distance_az"] = (self.data["az"] - self.x_sat).isel(
+        #     slow_time=0
+        # )
+        dim_window = "az_idx"
+        self.data["distance_az"] = (self.data[dim_window] - self.data[dim_window].mean())
+        self.data["distance_ground"] = calculate_distance(
+            x=self.data["distance_az"], y=self.data["grg"]
+        )
+        self.data["inc_scatt_eqv"] = np.rad2deg(
+            np.arctan(self.data["distance_ground"] / self.z0)
+        )
+        self.data["inc_scatt_eqv_cube"] = self.data["inc_scatt_eqv"].expand_dims(
+            dim={"slow_time": self.data.slow_time}
+        )
+        self.data["nrcs_scat_eqv"] = (
+            self.data["inc_scatt_eqv_cube"].dims, 
+            da.empty_like(self.data["inc_scatt_eqv_cube"])
+        )
+        self.data = self.data.transpose("az_idx", "grg", "slow_time")
+        self.data = self.data.astype(self._dtype_compress).unify_chunks()
 
-        self.data = self.data.transpose('az_idx', 'grg', 'slow_time')
-        self.data = self.data.astype('float32').unify_chunks()
-
-        def windfield_over_slow_time(ds, dimensions = ['az_idx', 'grg', 'slow_time']):
-            """
-            Wrapper of CMOD5.n to enable dask's lazy computations
-            
-            input
-            -----
-            ds: xr.Dataset, dataset containing the fields 'windfield', 'inc_scatt_eqv' and the attribute 'wdir_wrt_sensor'
-            dims: list, list of strings containing the dimensions for which the nrcs is calculated per the equivalent scatterometer incidence
-
-            output
-            ------
-            ds: xr.Dataset, dataset containing a new variable 'nrcs_scat_eqv'
-            """
-
-            nrcs_scatterometer_equivalent = cmod5n_forward(ds['windfield'].data, ds['wdir_wrt_sensor'].data, ds['inc_scatt_eqv_cube'].data)
-            ds['nrcs_scat_eqv'] = (dimensions, nrcs_scatterometer_equivalent, {'units': 'm/s'}) 
-            return ds
-
-        self.data = self.data.map_blocks(windfield_over_slow_time)
-        self.data = self.data.astype('float32')
+        self.data = self.data.map_blocks(wrapper_wind2nrcs, template=self.data)
+        self.data = self.data.astype(self._dtype_compress)
         return
 
 
@@ -800,7 +885,17 @@ class S1DopplerLeakage:
         beam = beam_az * beam_grg
         self.data['beam'] = ([*self.data.az_angle_wrt_boresight.sizes], beam)
 
-        self.data = self.data.astype('float32')
+        beam_grg = sinc_bp(
+            sin_angle=np.sin(self.data.grg_angle_wrt_boresight),
+            L=self.antenna_height,
+            f0=self.f0,
+        )
+        beam_grg_two_way = beam_grg**2
+
+        beam = beam_az_two_way * beam_grg_two_way
+        self.data["beam"] = ([*self.data.az_angle_wrt_boresight.sizes], beam)
+
+        self.data = self.data.astype(self._dtype_compress)
         return
 
     def compute_leakage_velocity(self, add_pulse_pair_uncertainty = True):
@@ -905,8 +1000,9 @@ class S1DopplerLeakage:
         self.data = self.data.astype('float32')
         self.data['V_sigma'] = self.data['V_leakage_pulse_rg'] + self.data['V_pp']
 
-        # re-interpolate to higher sampling to maintain uniform ground samples
-        self.data = self.data.interp(grg=grg_for_safekeeping, method="linear")
+        # ------- re-interpolate to higher sampling to maintain uniform ground samples -------
+        self.data = self.data.interp(grg=grg_for_safekeeping, method=self._interpolator)
+        self.data = self.data.astype(self._dtype_compress)
 
         # low-pass filter scatterometer data to subscene resolution
         data_4subscene= ['doppler_pulse_rg', 'V_leakage_pulse_rg', 'V_sigma', 'nrcs_scat']
@@ -930,8 +1026,9 @@ class S1DopplerLeakage:
         var_grg = "sample"
 
         # find indexes of S1 scene that were cropped (outside full beam pattern)
-        idx_start = self.idx_az[0][self.az_mask_pixels_cutoff]
-        idx_end = self.idx_az[-1][self.az_mask_pixels_cutoff]
+        delta = 1E-10
+        idx_start = int(np.round(self.window_size/2 + delta)) #self.idx_az[0][self.az_mask_pixels_cutoff]
+        idx_end = int(self.S1_file.sizes['line'] - np.round(self.window_size/2 + delta)) #self.idx_az[-1][self.az_mask_pixels_cutoff]
 
         # create placeholder S1 data (pre-cropped)
         new_nrcs = np.nan * np.ones_like(self.S1_file[var_nrcs])
