@@ -22,6 +22,7 @@ from .conversions import dB, convert_to_0_360, phase2vel, dop2vel, vel2dop, slan
 from .uncertainties import pulse_pair_coherence, generate_complex_speckle, speckle_intensity, phase_error_generator 
 from .low_pass_filter import low_pass_filter_2D_dataset
 from .frequency_domain_padding import padding_fourier, da_integer_oversample_like, compute_padding_1D
+from .open_SAFE import open_S1
 from . import constants
 
 import types
@@ -202,145 +203,11 @@ class S1DopplerLeakage:
 
     def open_data(self):
         """
-        Open data from a file or a list of files. First check if file can be reloaded
+        Open Sentinel-1 data from a file or a list of files. First check if file can be reloaded
         """
 
-        attrs_to_str = ["start_date", "stop_date", "footprint", "multidataset"]
-        vars_to_keep = [
-            "ground_heading",
-            "time",
-            "incidence",
-            "latitude",
-            "longitude",
-            "sigma0",
-            "ground_range_approx",
-        ]
-        coords_to_drop = "spatial_ref"
-        pol = "VV"
-
-        def create_storage_name(filename, grid_spacing):
-            """
-            Function to create a storage name for given Sentinel-1 .SAFE file(s)
-            """
-            if isinstance(filename, str):
-                ref_file = filename
-                unique_ids = find_unique_id(filename)
-
-            elif isinstance(filename, list):
-                ref_file = filename[0]
-                unique_ids = [find_unique_id(file) for file in filename]
-                unique_ids.sort()
-                unique_ids = "_".join(unique_ids)
-
-            id_end = ref_file.rfind("/") + 1
-            storage_dir = ref_file[:id_end]
-            return storage_dir + unique_ids + f"_res{grid_spacing}.nc"
-
-        def find_unique_id(filename, unique_id_length=4):
-            """
-            Function to find the last four digits (unique ID) of Sentinel-1 naming convention
-            """
-            id_start = filename.rfind("_") + 1
-            return filename[id_start : id_start + unique_id_length]
-
-        def compute_S1_ground_range(ds: xr.Dataset, c=3e8) -> xr.DataArray:
-            """
-            Computes approximate ground range corresponding to elevation angle and slant range travel time
-            """
-            slant_range_distance = (ds.slant_range_time * c) / 2
-            ground_range_approx = (
-                np.sin(np.deg2rad(ds.elevation)) * slant_range_distance
-            )
-            return ground_range_approx
-
-        def open_new_file(filename, grid_spacing):
-            """
-            Loads Sentinel-1 .SAFE file(s) and, if multiple, concatenate along azimuth (sorted by time)
-            """
-
-            dim_concat = "line"
-            var_sortby = "time"
-
-            # Surpress some warnings
-            output_buffer = io.StringIO()
-            stdout_save = sys.stdout
-            sys.stdout = output_buffer
-
-            # Use the catch_warnings context manager to temporarily catch warnings
-            with warnings.catch_warnings(record=True) as caught_warnings:
-                self._successful_files = []
-                if isinstance(filename, str):
-                    S1_file = xsar.open_dataset(filename, resolution=grid_spacing)
-                    self._successful_files.append(filename)
-                elif isinstance(filename, list):
-                    _file_contents = []
-                    for i, file in enumerate(filename):
-                        try:
-                            content_partial = xsar.open_dataset(
-                                file, resolution=grid_spacing
-                            )
-                            _file_contents.append(content_partial)
-                            self._successful_files.append(file)
-                        except Exception as e:
-                            # temporarily stop surpressing warnings
-                            sys.stdout = stdout_save
-                            print(
-                                f"File {i} did not load properly. \nConsider manually adding file content to _file_contents. File in question: {file} \n Error: {e}"
-                            )
-                            sys.stdout = output_buffer
-
-                    # concatenate data ensuring that it is sorted by time.
-                    data_concatened = xr.concat(_file_contents, dim_concat)
-                    data_sorted = data_concatened.sortby(var_sortby)
-
-                    # redifine coordinate labels of concatened dimension
-                    line_step = data_sorted.line.diff(dim=dim_concat).max()
-                    S1_file = data_sorted.assign_coords(
-                        line=line_step.data * np.arange(data_sorted[dim_concat].size)
-                    )
-
-            # Reset system output to saved version
-            sys.stdout = stdout_save
-            return S1_file
-
-        storage_name = create_storage_name(self.filename, self.grid_spacing)
-
-        # reload file if possible
-        if os.path.isfile(storage_name):
-            print(f"Associated file found and reloaded: {storage_name}")
-            self.S1_file = xr.open_dataset(storage_name)
-
-        # else open .SAFE files, process and save as .nc
-        else:
-            self.S1_file = open_new_file(self.filename, self.grid_spacing)
-            storage_name = create_storage_name(
-                self._successful_files, self.grid_spacing
-            )
-
-            # convert to attributes to ones storeable as .nc
-            for attr in attrs_to_str:
-                self.S1_file.attrs[attr] = str(self.S1_file.attrs[attr])
-
-            # drop coordinate with a lot of attributes
-            self.S1_file = self.S1_file.drop_vars(coords_to_drop)
-
-            # keep only VV polarisation
-            self.S1_file = self.S1_file.sel(pol=pol)
-
-            # compute approximate ground range
-            self.S1_file["ground_range_approx"] = compute_S1_ground_range(
-                ds=self.S1_file, c=constants.c
-            )
-
-            # store as .nc file ...
-            self.S1_file[vars_to_keep].to_netcdf(storage_name)
-
-            # ... and reload
-            self.S1_file = xr.open_dataset(storage_name)
-
-            print(
-                f"No pre-saved file found, instead saved loaded file as: {storage_name}"
-            )
+        self.S1_file = open_S1(self.filename, grid_spacing=self.grid_spacing)
+        
         return
 
     def querry_era5(self):
