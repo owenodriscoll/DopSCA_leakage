@@ -1,21 +1,21 @@
 [project]
 name = "dopsca"
-dynamic = ["version"]
+version = "0.1.0"
 authors = [
   { name="Owen O'D"},
 ]
 description = "Python package for automated hyperparameter-optimization of common machine-learning algorithms"
 readme = "README.md"
-requires-python = ">=3.11.0" #,<=3.12
+# requires-python = ">=3.11.0" #,<=3.12
 classifiers = [
-    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
 ]
 
 
 dependencies = [
-  "xsar[S1]",
+  "xsar[S1] == 2024.4.*",
   "dask",
   "xarray",
   "drama",
@@ -35,6 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ['pytest']
+dev = ['black[jupyter]']
 
 
 [project.urls]
