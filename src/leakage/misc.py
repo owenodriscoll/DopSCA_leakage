@@ -8,6 +8,7 @@ import io
 import warnings
 import xrft
 
+
 def round_to_hour(dt):
     dt_start_of_hour = dt.replace(minute=0, second=0, microsecond=0)
     dt_half_hour = dt.replace(minute=30, second=0, microsecond=0)
@@ -34,7 +35,9 @@ def angular_difference(a, b):
     Calculate the angular difference between angles a and b.
     """
     normalized_a = normalize_angle(a + 90)  # add 90 degrees as radar is right looking
-    normalized_b = normalize_angle(b + 180) # add 180 degrees to go from blowing towards, to blowing from
+    normalized_b = normalize_angle(
+        b + 180
+    )  # add 180 degrees to go from blowing towards, to blowing from
 
     # Calculate the angular difference
     diff = (normalized_b - normalized_a + 180) % 360 - 180
@@ -42,97 +45,8 @@ def angular_difference(a, b):
     return diff
 
 
-def calculate_distance(x, y, x0=0 , y0=0):
-    return np.sqrt((x - x0) ** 2 + (y - y0 ) ** 2)
-
-
-def era5_wind_monthly(year, month, directory = ''):
-    import cdsapi
-    c = cdsapi.Client()
-    c.retrieve(
-        'reanalysis-era5-single-levels',
-        {
-            'product_type': 'reanalysis',
-            'format': 'netcdf',
-            'variable': [
-                'temperature', '10m_u_component_of_wind', '10m_v_component_of_wind',
-            ],
-            'year': str(year),
-            'month': str(month),
-            'day': [
-                '01', '02', '03',
-                '04', '05', '06',
-                '07', '08', '09',
-                '10', '11', '12',
-                '13', '14', '15',
-                '16', '17', '18',
-                '19', '20', '21',
-                '22', '23', '24',
-                '25', '26', '27',
-                '28', '29', '30', '31',
-            ],
-            'time': [
-                '00:00', '01:00', '02:00',
-                '03:00', '04:00', '05:00',
-                '06:00', '07:00', '08:00',
-                '09:00', '10:00', '11:00',
-                '12:00', '13:00', '14:00',
-                '15:00', '16:00', '17:00',
-                '18:00', '19:00', '20:00',
-                '21:00', '22:00', '23:00',
-            ],
-        },
-        f'{directory}era5_wind_{str(year)+str(month)}.nc')
-    return
-    
-
-def era5_wind_point(year, month, day, time, lat, lon, filename):
-    """
-    add trailing '/' to directory
-    """
-    import cdsapi
-    c = cdsapi.Client()
-    c.retrieve(
-        'reanalysis-era5-single-levels',
-        {
-            'product_type': 'reanalysis',
-            'format': 'netcdf',
-            'variable': [
-                'temperature', '10m_u_component_of_wind', '10m_v_component_of_wind',
-            ],
-            'year': str(year),
-            'month': str(month),
-            'day': str(day),
-            'time': str(time),
-            'area': [lat, lon, lat, lon],
-        },
-        f'{filename}')
-    return
-
-def era5_wind_area(year, month, day, time, latmax, lonmin, latmin, lonmax, filename):
-    """
-    add trailing '/' to directory
-
-    Downloads ERA5 data for an area given a specific time and extent
-    """
-    import cdsapi
-    c = cdsapi.Client()
-    c.retrieve(
-        'reanalysis-era5-single-levels',
-        {
-            'product_type': 'reanalysis',
-            'format': 'netcdf',
-            'variable': [
-                'temperature', '10m_u_component_of_wind', '10m_v_component_of_wind',
-            ],
-            'year': str(year),
-            'month': str(month),
-            'day': str(day),
-            'time': str(time),
-            'area': [latmax, lonmin, latmin, lonmax],
-        },
-        f'{filename}')
-    return
+def calculate_distance(x, y, x0=0, y0=0):
+    return np.sqrt((x - x0) ** 2 + (y - y0) ** 2)
 
 
 def warning_catcher_ML(function, *args):
@@ -149,65 +63,82 @@ def warning_catcher_ML(function, *args):
         except Exception as e:
             sys.stdout = stdout_save
             print(e)
-        
+
         sys.stdout = stdout_save
 
     return result
 
 
-def prediction_ML(filename: str, model_ML: str, field_data: str = 'nrcs_scat_subscene_w_noise'):
-    
+def prediction_ML(
+    filename: str, model_ML: str, field_data: str = "nrcs_scat_subscene_w_noise"
+):
+
     data = xr.open_dataset(filename)
     model = joblib.load(model_ML)
 
     # slow time can not be indexed for concatonation step, remove indexing if present
     try:
-        data = data.reset_index('slow_time')
+        data = data.reset_index("slow_time")
     except:
         pass
 
     # select samples along azimuth to fill azimuth beam footpint cutoff
-    n = int(data.az_mask_cutoff / data.stride / 2) 
+    n = int(data.az_mask_cutoff / data.stride / 2)
 
     # select spaced data
-    X_data = xr.concat([data[field_data].isel(slow_time=slice(i-n, 1+i+n)).drop_vars('slow_time') for i in range(n, len(data[field_data]['slow_time'])-n)], dim='placeholder')
+    X_data = xr.concat(
+        [
+            data[field_data]
+            .isel(slow_time=slice(i - n, 1 + i + n))
+            .drop_vars("slow_time")
+            for i in range(n, len(data[field_data]["slow_time"]) - n)
+        ],
+        dim="placeholder",
+    )
 
     # reshape data and turn in M * (2n + 1) dataframe
-    X_test_pre = X_data.values.reshape(-1, 2 * n+1)
+    X_test_pre = X_data.values.reshape(-1, 2 * n + 1)
     df_data = pd.DataFrame(X_test_pre)
 
     # exclude indexes containing NaN's, these cannot be fed to ML algorithm
-    indexes_non_nan = df_data[~df_data.isna().any(axis = 1)].index.values
+    indexes_non_nan = df_data[~df_data.isna().any(axis=1)].index.values
     df_data.dropna(inplace=True)
 
     # perform predict using a warning catcher
     pred = warning_catcher_ML(model.predict, df_data)
-    
+
     # add prediction to empty field, accounting for indexes
-    empty_field = np.nan*np.ones_like(data[field_data]).ravel()
+    empty_field = np.nan * np.ones_like(data[field_data]).ravel()
     empty_field[indexes_non_nan] = pred
 
-    # reconstruct original shape 
+    # reconstruct original shape
     result = empty_field.reshape(*data[field_data].T.shape)
 
     # account for missing "n" rows at the bottom
-    result = np.roll(result, shift = n, axis=0)
+    result = np.roll(result, shift=n, axis=0)
 
     # add to data
-    data['estimate'] = (['grg', 'slow_time'], result.T)
+    data["estimate"] = (["grg", "slow_time"], result.T)
     return data
 
 
-def power_spectrum_custom(da, dim = None, scaling = 'spectrum', detrend = 'constant', window = 'hann', window_correction = 'True'):
+def power_spectrum_custom(
+    da,
+    dim=None,
+    scaling="spectrum",
+    detrend="constant",
+    window="hann",
+    window_correction="True",
+):
     condition_fill = np.isfinite(da)
     da_filled = xr.where(condition_fill, da, 0)
 
-    p2 =xrft.power_spectrum(
-        da = da_filled,
-        dim = dim,
-        scaling = scaling,
-        detrend = detrend,
-        window = window,
-        window_correction = window_correction
-        )
+    p2 = xrft.power_spectrum(
+        da=da_filled,
+        dim=dim,
+        scaling=scaling,
+        detrend=detrend,
+        window=window,
+        window_correction=window_correction,
+    )
     return p2

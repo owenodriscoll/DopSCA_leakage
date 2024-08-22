@@ -16,13 +16,14 @@ from stereoid.oceans.GMF.cmod5n import cmod5n_inverse, cmod5n_forward
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 from dataclasses import dataclass
 
-from .misc import round_to_hour, angular_difference, calculate_distance, era5_wind_area
+from .misc import round_to_hour, angular_difference, calculate_distance
 from .utils import mean_along_azimuth
 from .conversions import dB, convert_to_0_360, phase2vel, dop2vel, vel2dop, slant2ground
 from .uncertainties import pulse_pair_coherence, generate_complex_speckle, speckle_intensity, phase_error_generator 
 from .low_pass_filter import low_pass_filter_2D_dataset
 from .frequency_domain_padding import padding_fourier, da_integer_oversample_like, compute_padding_1D
 from .open_SAFE import open_S1
+from .era5_download import wdir_from_era5, querry_era5
 from . import constants
 
 import types
@@ -179,12 +180,6 @@ class S1DopplerLeakage:
             self.az_footprint_cutoff / 2 // self.grid_spacing
         )
 
-        # set smoothing window of era5 based on grid size of loaded S1 data
-        if type(self.era5_smoothing_window) == types.NoneType:
-            self.era5_smoothing_window = int(
-                (200 / self.grid_spacing) * 15
-            )  # a bit arbitrary values, but they dont really matter
-
         # Store attributes in object
         attributes_to_store = copy.deepcopy(self.__dict__)
 
@@ -201,16 +196,16 @@ class S1DopplerLeakage:
                 "Combination of vx_sat, PRF and grid_spacing may lead to aliasing: (vx_sat / PRF) % grid_spacing != 0"
             )
 
-    def open_data(self):
+    def load_S1(self):
         """
         Open Sentinel-1 data from a file or a list of files. First check if file can be reloaded
         """
 
         self.S1_file = open_S1(self.filename, grid_spacing=self.grid_spacing)
-        
+
         return
 
-    def querry_era5(self):
+    def load_era5(self):
         """
         Opens or downloads relevant ERA5 data to find the wind direction w.r.t. to the radar.
         1. Will first attempt to load a specific file (if provided).
@@ -227,172 +222,36 @@ class S1DopplerLeakage:
         var_time = "time"
         var_lon = "longitude"
         var_lat = "latitude"
-        var_azi = "line"
-        var_grg = "sample"
 
         date = (
             self.S1_file[var_time].min().values.astype("datetime64[m]").astype(object)
         )
-        date_rounded = round_to_hour(date)
-        yy, mm, dd, hh = (
-            date_rounded.year,
-            date_rounded.month,
-            date_rounded.day,
-            date_rounded.hour,
-        )
-        time = f"{hh:02}00"
 
         latitudes = self.S1_file[var_lat]
         longitudes = self.S1_file[var_lon]
-        latmean, lonmean = latitudes.mean().values * 1, longitudes.mean().values * 1
-        latmin, latmax = latitudes.min().values * 1, latitudes.max().values * 1
-        lonmin, lonmax = longitudes.min().values * 1, longitudes.max().values * 1
-        lonmin, lonmax = [
-            convert_to_0_360(i) for i in [lonmin, lonmax]
-        ]  # NOTE correction for fact that ERA5 goes between 0 - 360
 
-        if type(self.era5_file) == str:
-            era5 = xr.open_dataset(self.era5_file)
-        else:
-            sub_str = str(yy) + str(mm)
-            try:
-                # try to find if monthly data file exists which to load
-                era5_filename = [
-                    s
-                    for s in glob.glob(f"{self.era5_directory}*")
-                    if sub_str + ".nc" in s
-                ][0]
-            except:
-                #  if not, try to find single estimate hour ERA5 wind file
-                era5_filename = f"era5_{yy}{mm:02d}{dd:02d}h{time}_lat{latmean:.1f}_lon{lonmean:.1f}.nc"
-                era5_filename = era5_filename.replace(".", "_", 2)
-                if not self.era5_directory is None:
-                    era5_filename = os.path.join(self.era5_directory, era5_filename)
-
-                # if neither monthly file nor hourly single estimate file exist, download new single estimate hour
-                if not os.path.isfile(era5_filename):
-                    era5_wind_area(
-                        year=yy,
-                        month=mm,
-                        day=dd,
-                        time=time,
-                        lonmin=lonmin,
-                        lonmax=lonmax,
-                        latmin=latmin,
-                        latmax=latmax,
-                        filename=era5_filename,
-                    )
-
-            print(
-                f"Loading nearest ERA5 point w.r.t. observation from ERA5 file: {era5_filename}"
+        era_data = querry_era5(
+            date=date,
+            latitudes=latitudes,
+            longitudes=longitudes,
+            grid_spacing=self.grid_spacing,
+            era5_file=self.era5_file,
+            directory=self.era5_directory,
+            era5_smoothing_window=self.era5_smoothing_window,
+            era5_undersample_factor=self.era5_undersample_factor
             )
-            era5 = xr.open_dataset(era5_filename)
 
-        era5_subset_time = era5.sel(
-            time=np.datetime64(date_rounded, "ns"), method="nearest"
-        )
-
-        era5_subset = era5_subset_time.sel(
-            longitude=convert_to_0_360(self.S1_file[var_lon]),
-            latitude=self.S1_file[var_lat],
-            method="nearest",
-        )
-
-        # ERA5 data is subsampled
-        # this should not affect resolution much as, for example, the resolution of 1/4 deg ERA5 is approx 50km,
-        # The resampled grid size should still be ~50km (S1 resolution * era5_smoothing_window * era5_undersample_factor ~ 50km)
-        resolution_condition = (
-            self.grid_spacing
-            * self.era5_undersample_factor
-            * (1 * self.era5_smoothing_window)
-        )  # NOTE * 1 because only mean window operations considered
-
-        # checks whether resampling is unacceptable
-        # resolution is ideally twice the grid spacing and 1 degree is approximately 100km
-        resolution_era5_deg = 2 * min(
-            [
-                abs(era5.latitude.diff(dim="latitude")).min(),
-                abs(era5.longitude.diff(dim="longitude")).min(),
-            ]
-        )
-        resolution_era5_m = 100e3 * resolution_era5_deg
-        message = (
-            lambda x: f"Warning: interpolated ERA5 data may be {x[0]}. \nConsider plotting fields in self.era5 for inspection and/or {x[1]} the undersample_factor or the smoothing_window size."
-        )
-
-        if (
-            resolution_condition >= 1.33 * resolution_era5_m
-        ):  # arbitrary threshold at which ERA5 resolution may be degraded
-            print(message(["over-smoothed", "decreasing"]))
-        elif (
-            resolution_condition <= 0.50 * resolution_era5_m
-        ):  # arbitrary threshold at which grainy ERA5 is expected (maybe cause artifacts)
-            print(message(["under-smoothed", "increasing"]))
-
-        # create a placeholder dataset to avoid having to subsample/oversample on datetime vectors
-        azimuth_time_placeholder = np.arange(era5_subset.sizes[var_azi])
-        ground_range_placeholder = np.arange(era5_subset.sizes[var_grg])
-        era5_placeholder = era5_subset.assign_coords(
-            {var_azi: azimuth_time_placeholder, var_grg: ground_range_placeholder}
-        )
-
-        # Subsample the dataset by interpolation
-        new_azimuth_time = (
-            np.arange(era5_subset.sizes[var_azi] / self.era5_undersample_factor)
-            * self.era5_undersample_factor
-        )
-        new_ground_range = (
-            np.arange(era5_subset.sizes[var_grg] / self.era5_undersample_factor)
-            * self.era5_undersample_factor
-        )
-        era5_subsamp = era5_placeholder.interp(
-            {var_azi: new_azimuth_time, var_grg: new_ground_range}, method="linear"
-        )
-
-        # first perform median filter (performs better if anomalies are present),then mean filter to smooth edges
-        era5_smoothed = era5_subsamp.rolling(
-            {var_azi: self.era5_smoothing_window, var_grg: self.era5_smoothing_window},
-            center=True,
-            min_periods=2,
-        ).median()
-        era5_smoothed = era5_smoothed.rolling(
-            {var_azi: self.era5_smoothing_window, var_grg: self.era5_smoothing_window},
-            center=True,
-            min_periods=2,
-        ).mean()
-
-        # re-interpolate to the native resolution and add to object
-        era5_interp = era5_smoothed.interp(
-            {var_azi: azimuth_time_placeholder, var_grg: ground_range_placeholder},
-            method="linear",
-        )
-        self.era5 = era5_interp.assign_coords(
-            {var_azi: era5_subset[var_azi], var_grg: era5_subset[var_grg]}
-        )
-        return
-
-    def wdir_from_era5(self):
-        """
-        Calculates the wind direction with respect to the sensor using the ground geometry and era5 wind vectors
-        """
-
-        var_lon = "longitude"
-        var_lat = "latitude"
-        wdir_era5 = np.rad2deg(np.arctan2(self.era5.u10, self.era5.v10))
-
-        # compute ground footprint direction
-        geodesic = pyproj.Geod(ellps="WGS84")
         corner_coords = [
-            self.S1_file[var_lon][0, 0],
-            self.S1_file[var_lat][0, 0],
-            self.S1_file[var_lon][-1, 0],
-            self.S1_file[var_lat][-1, 0],
+            longitudes[0, 0],
+            latitudes[0, 0],
+            longitudes[-1, 0],
+            latitudes[-1, 0],
         ]
-        ground_dir, _, _ = geodesic.inv(*corner_coords)
 
-        # compute directional difference between satelite and era5 wind direction
-        self.wdir_wrt_sensor = angular_difference(ground_dir, wdir_era5)
+        self.wdir_wrt_sensor = wdir_from_era5(era_data, corner_coords)
+
         return
+
 
     def create_dataset(self, var_nrcs: str = "sigma0", var_inc: str = "incidence"):
         """
@@ -937,9 +796,9 @@ class S1DopplerLeakage:
         Calls relevant methods in correct order and performs final computations after dask's lazy computations
         """
 
-        self.open_data()
-        self.querry_era5()
-        self.wdir_from_era5()
+        self.load_S1()
+        self.load_era5()
+        # self.wdir_from_era5()
         self.create_dataset()
         self.create_beam_mask()
         self.compute_scatt_eqv_backscatter()
