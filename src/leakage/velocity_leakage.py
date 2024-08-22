@@ -551,7 +551,6 @@ class S1DopplerLeakage:
             np.arange(self.S1_file[var_nrcs].data.shape[0])
             - self.S1_file[var_nrcs].data.shape[0] // 2
         ) * self.grid_spacing
-        x_sat = np.arange(az.min(), az.max(), self.stride)
 
         # create new dataset
         data = xr.Dataset(
@@ -609,12 +608,6 @@ class S1DopplerLeakage:
         # Remove data that, even after filling, does not meet criteria
         data = data.where(~(conditions_post))
 
-        # add another dimension for later use
-        x_sat = da.arange(data[dim_az].min(), data[dim_az].max(), self.stride)
-        slow_time = self.stride * da.arange(x_sat.shape[0])
-        x_sat = xr.DataArray(x_sat, dims="slow_time", coords={"slow_time": slow_time})
-        data = data.assign(x_sat=x_sat)
-
         # update with previously stored data
         data.attrs.update(self.attributes_to_store)
 
@@ -625,58 +618,38 @@ class S1DopplerLeakage:
         """
         Function to remove data outside beam pattern footprint as determined by "az_mask_pixels_cutoff".
         Creates a new stack of (potentially overlapping) observations centered on a new azimuthmul coordinate system
+
+        NOTE does not work for squinted geometries
         """
 
-        # find indexes along azimuth with beam beam center NOTE does not work for squinted geometries
-        beam_center = (
-            abs(self.data["x_sat"] - self.data["az"]).argmin(dim=["az"])["az"].values
-        )
-
-        # find indxes within allowed beam with over slow time
-        masks = []
-        lengths = []
-        for i in beam_center:
-            mask = np.zeros_like(self.data["az"])  # create a mask
-            lower_limit = np.where(
-                i - self.az_mask_pixels_cutoff < 0, 0, i - self.az_mask_pixels_cutoff
-            )
-            mask[lower_limit : i + self.az_mask_pixels_cutoff + 1] = 1
-            idx_valid = np.argwhere(mask).squeeze()
-            lengths.append(idx_valid.shape[0])
-            masks.append(idx_valid)
-
-        # determine which slow-time observations occur at the edges of the scenes, to filter out
-        l = np.array(lengths)
-        l_max = l.max()
-        idx_slow_time = np.argwhere(l == l_max).squeeze()
-        self.idx_slow_time = idx_slow_time
-
-        # prepare clipping indixes outside beam pattern
-        _data = []
+        dim_original = "grg"
         dim_filter = "az"
-        dim_new = "az_idx"
-        dim_new_res = self.data.attrs["grid_spacing"]
+        dim_new = "slow_time"
+        dim_window = "az_idx"
 
-        # array with azimuth indexes to select over slow time
-        idx_az = np.array([masks[i] for i in idx_slow_time])
-        self.idx_az = idx_az
+        self.window_size = np.round(self.az_footprint_cutoff / self.grid_spacing).astype("int")
+        self.stride_elements = np.round(self.vx_sat / self.PRF / self.grid_spacing).astype("int")
 
-        # prepare data by chunking and conversion to lower bit
-        self.data = self.data.astype("float32").chunk("auto")
 
-        # this loop is an ugly way of sliding and subsetting along azimuth
-        for i, st in enumerate(idx_slow_time):
+        self.data = self.data.chunk({dim_filter: 1, dim_original:"auto"})
+        self.data = self.data.rolling({dim_filter: self.window_size}, center=True).construct({dim_filter:dim_window}, stride=self.stride_elements)
+        stride = (self.data[dim_filter][-1] - self.data[dim_filter][0]) / (self.data[dim_filter].sizes[dim_filter]-1)
+        self.stride = float(stride.data)
+        slow_time = da.arange(self.data[dim_filter].sizes[dim_filter]) * self.stride
+        slow_time
+        self.data = self.data.assign_coords(
+                        {dim_new: (dim_filter, slow_time),
+                        dim_window: (self.data[dim_window] * self.grid_spacing)}
+                    )
+        self.data = self.data.swap_dims({dim_filter: dim_new})
+        self.data = self.data.reset_coords(names=dim_filter)
 
-            a = self.data.isel(slow_time=st, az=idx_az[i])
-            a = a.assign_coords(
-                {dim_new: (dim_filter, dim_new_res * np.arange(a.sizes[dim_filter]))}
-            )
-            a = a.swap_dims({dim_filter: dim_new})
-            a = a.reset_coords(names=dim_filter)
-
-            _data.append(a)
-
-        self.data = xr.concat(_data, dim="slow_time")
+        delta = 1E-10
+        self.to_clip = np.round(self.window_size/self.stride_elements + delta, 0).astype(int)
+        self.start_idx = np.round(self.to_clip / 2).astype(int)
+        self.end_idx = (self.to_clip - self.start_idx).astype(int)
+        self.data = self.data.isel({dim_new : slice(self.start_idx, -self.end_idx)})
+        self.data = self.data.chunk({dim_new: "auto", dim_original:"auto", dim_window:-1})
         return
 
     def compute_scatt_eqv_backscatter(self):
@@ -684,9 +657,8 @@ class S1DopplerLeakage:
         From the submitted viewing geometry, calculates the nrcs as would be observed by the scatterometer
         """
 
-        self.data["distance_az"] = (self.data["az"] - self.data["x_sat"]).isel(
-            slow_time=0
-        )
+        dim_window = "az_idx"
+        self.data["distance_az"] = (self.data[dim_window] - self.data[dim_window].mean())
         self.data["distance_ground"] = calculate_distance(
             x=self.data["distance_az"], y=self.data["grg"]
         )
@@ -972,8 +944,10 @@ class S1DopplerLeakage:
         var_grg = "sample"
 
         # find indexes of S1 scene that were cropped (outside full beam pattern)
-        idx_start = self.idx_az[0][self.az_mask_pixels_cutoff]
-        idx_end = self.idx_az[-1][self.az_mask_pixels_cutoff]
+        delta = 1E-10
+        idx_start = int(np.round(self.window_size/2 + delta)) #self.idx_az[0][self.az_mask_pixels_cutoff]
+        idx_end = int(self.S1_file.sizes['line'] - np.round(self.window_size/2 + delta)) #self.idx_az[-1][self.az_mask_pixels_cutoff]
+
 
         # create placeholder S1 data (pre-cropped)
         new_nrcs = np.nan * np.ones_like(self.S1_file[var_nrcs])
@@ -1105,7 +1079,7 @@ class S1DopplerLeakage:
         self.compute_leakage_velocity()
         self.compute_leakage_velocity_estimate()
 
-        self.data[data_to_return] = self.data[data_to_return].chunk("auto").persist()
+        self.data[data_to_return] = self.data[data_to_return].persist()
         return
 
 
