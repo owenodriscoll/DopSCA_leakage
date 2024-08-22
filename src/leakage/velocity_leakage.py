@@ -22,6 +22,7 @@ from .conversions import dB, convert_to_0_360, phase2vel, dop2vel, vel2dop, slan
 from .uncertainties import pulse_pair_coherence, generate_complex_speckle, speckle_intensity, phase_error_generator 
 from .low_pass_filter import low_pass_filter_2D_dataset
 from .frequency_domain_padding import padding_fourier, da_integer_oversample_like, compute_padding_1D
+from . import constants
 
 import types
 from typing import Callable, Union, List, Dict, Any
@@ -57,7 +58,7 @@ from typing import Callable, Union, List, Dict, Any
 
 
 # constants
-c = 3e8
+# c = 3e8
 
 
 @dataclass
@@ -171,7 +172,7 @@ class S1DopplerLeakage:
 
     def __post_init__(self):
 
-        self.Lambda = c / self.f0
+        self.Lambda = constants.c / self.f0
         self.stride = self.vx_sat / self.PRF
         self.az_mask_pixels_cutoff = int(
             self.az_footprint_cutoff / 2 // self.grid_spacing
@@ -328,7 +329,7 @@ class S1DopplerLeakage:
 
             # compute approximate ground range
             self.S1_file["ground_range_approx"] = compute_S1_ground_range(
-                ds=self.S1_file, c=c
+                ds=self.S1_file, c=constants.c
             )
 
             # store as .nc file ...
@@ -636,7 +637,7 @@ class S1DopplerLeakage:
         stride = (self.data[dim_filter][-1] - self.data[dim_filter][0]) / (self.data[dim_filter].sizes[dim_filter]-1)
         self.stride = float(stride.data)
         slow_time = da.arange(self.data[dim_filter].sizes[dim_filter]) * self.stride
-        slow_time
+        
         self.data = self.data.assign_coords(
                         {dim_new: (dim_filter, slow_time),
                         dim_window: (self.data[dim_window] * self.grid_spacing)}
