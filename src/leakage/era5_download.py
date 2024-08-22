@@ -159,8 +159,9 @@ def querry_era5(
     if type(era5_smoothing_window) == types.NoneType:
         era5_smoothing_window = int((200 / grid_spacing) * 15)
 
-    var_azi = "line"
-    var_grg = "sample"
+    # NOTE this is not nice because different dimension order will cause it to break
+    var_azi, var_grg = list(latitudes.sizes)
+    assert list(latitudes.sizes) == list(longitudes.sizes)
 
     date_rounded = round_to_hour(date)
     yy, mm, dd, hh = (
