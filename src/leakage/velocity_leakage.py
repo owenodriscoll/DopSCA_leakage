@@ -446,10 +446,10 @@ class S1DopplerLeakage:
 
         self.data["distance_slant_range"] = calculate_distance(
             x=self.data["distance_ground"], y=self.z0
-        )  
+        )
         self.data["az_angle_wrt_boresight"] = np.arcsin(
             (self.data["distance_az"]) / self.data["distance_slant_range"]
-        )  # NOTE arcsin instead of tan as distance_slant_range includes azimuthal angle
+        ) # NOTE arcsin instead of tan as distance_slant_range includes azimuthal angle
         self.data["grg_angle_wrt_boresight"] = np.deg2rad(
             self.data["inc_scatt_eqv"] - self.boresight_elevation_angle_scat
         )
@@ -488,6 +488,7 @@ class S1DopplerLeakage:
 
         self.data = self.data.astype("float32")
         return
+
 
     def compute_leakage_velocity(self, add_pulse_pair_uncertainty=True):
         """
@@ -654,7 +655,9 @@ class S1DopplerLeakage:
             fill_nans=True,
         )
         self.data[data_subscene] = data_lowpass
+
         return
+
 
     def compute_leakage_velocity_estimate(self):
         """
@@ -674,7 +677,6 @@ class S1DopplerLeakage:
         delta = 1E-10
         idx_start = int(np.round(self.window_size/2 + delta)) #self.idx_az[0][self.az_mask_pixels_cutoff]
         idx_end = int(self.S1_file.sizes['line'] - np.round(self.window_size/2 + delta)) #self.idx_az[-1][self.az_mask_pixels_cutoff]
-
 
         # create placeholder S1 data (pre-cropped)
         new_nrcs = np.nan * np.ones_like(self.S1_file[var_nrcs])
@@ -769,7 +771,9 @@ class S1DopplerLeakage:
 
         # add estimated leakage velocity back to original object
         self.data[data_to_return_new_names] = self_copy.data[data_to_return]
+
         return
+
 
     def apply(
         self,
@@ -798,7 +802,6 @@ class S1DopplerLeakage:
 
         self.load_S1()
         self.load_era5()
-        # self.wdir_from_era5()
         self.create_dataset()
         self.create_beam_mask()
         self.compute_scatt_eqv_backscatter()
@@ -807,6 +810,5 @@ class S1DopplerLeakage:
         self.compute_leakage_velocity_estimate()
 
         self.data[data_to_return] = self.data[data_to_return].persist()
+        
         return
-
-
