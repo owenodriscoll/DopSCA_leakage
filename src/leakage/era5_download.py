@@ -216,11 +216,8 @@ def querry_era5(
         )
         era5 = xr.open_dataset(era5_filename)
 
-    era5_subset_time = era5.sel(
-        time=np.datetime64(date_rounded, "ns"), method="nearest"
-    )
-
-    era5_subset = era5_subset_time.sel(
+    era5_subset = era5.sel(
+        time=np.datetime64(date_rounded, "ns"),
         longitude=convert_to_0_360(longitudes),
         latitude=latitudes,
         method="nearest",

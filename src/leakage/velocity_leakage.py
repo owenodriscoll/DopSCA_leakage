@@ -1,13 +1,9 @@
-import os
-import io
-import sys
-import glob
 import warnings
-import xsar
-import dask  # implicitely loaded
+import xsar  # implicitely loaded somewhere
+import dask  # implicitely loaded somewhere
 import copy
-import pyproj
-import xrft
+import pyproj # implicitely loaded somewhere
+import xrft # implicitely loaded somewhere
 import bottleneck  # implicitely loaded somewhere
 import numpy as np
 import xarray as xr
@@ -16,9 +12,9 @@ from stereoid.oceans.GMF.cmod5n import cmod5n_inverse, cmod5n_forward
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 from dataclasses import dataclass
 
-from .misc import round_to_hour, angular_difference, calculate_distance
+from .misc import calculate_distance
 from .utils import mean_along_azimuth
-from .conversions import dB, convert_to_0_360, phase2vel, dop2vel, vel2dop, slant2ground
+from .conversions import dB, phase2vel, dop2vel, vel2dop, slant2ground
 from .uncertainties import pulse_pair_coherence, generate_complex_speckle, speckle_intensity, phase_error_generator 
 from .low_pass_filter import low_pass_filter_2D_dataset
 from .frequency_domain_padding import padding_fourier, da_integer_oversample_like, compute_padding_1D
@@ -41,6 +37,7 @@ from typing import Callable, Union, List, Dict, Any
 # TODO add docstrings
     # TODO add kwargs to input for phased beam pattern in create_beampattern
 # TODO currently inversion interpolates scatterometer grid size to S1 grid, change to first apply inversion and then interpolate 
+# TODO replace current ERA5 interpolation with zero-padding in Fourier domain
 
 
 # NOTE Calculations assume 
@@ -57,10 +54,6 @@ from typing import Callable, Union, List, Dict, Any
         # NOTE calculation of az_mask_pixels_cutoff
     # NOTE number of antenna elements in azimuth and range are considered equal
     # NOTE pulse pair noise assumes a pair of pulses, not any other combination
-
-
-# constants
-# c = 3e8
 
 
 @dataclass
@@ -175,7 +168,7 @@ class S1DopplerLeakage:
     def __post_init__(self):
 
         self.Lambda = constants.c / self.f0
-        self.stride = self.vx_sat / self.PRF
+        self.stride_theoretical = self.vx_sat / self.PRF
         self.az_mask_pixels_cutoff = int(
             self.az_footprint_cutoff / 2 // self.grid_spacing
         )
@@ -191,7 +184,7 @@ class S1DopplerLeakage:
         self.attributes_to_store = attributes_to_store_updated
 
         # warn if aliasing might occur due to combination of spatial and sampling resolutions
-        if self.stride % self.grid_spacing != 0:
+        if self.stride_theoretical % self.grid_spacing != 0:
             warnings.warn(
                 "Combination of vx_sat, PRF and grid_spacing may lead to aliasing: (vx_sat / PRF) % grid_spacing != 0"
             )
@@ -716,7 +709,7 @@ class S1DopplerLeakage:
             ]
             self.da_speckle_c_padded_cut = da_speckle_c_padded_cut
 
-            # compute real speckle and add to and add speckle
+            # compute real speckle and add to nrcs
             speckle = speckle_intensity(da_speckle_c_padded_cut)
             nrcs_scat_speckle_slrg = nrcs_scat_slrg * speckle.data
 

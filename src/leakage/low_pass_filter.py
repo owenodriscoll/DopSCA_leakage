@@ -174,8 +174,7 @@ def low_pass_filter_2D_dataset(
 
     ds_filt = xr.Dataset(
         {
-            var
-            + "_subscene": low_pass_filter_2D(
+            var: low_pass_filter_2D(
                 ds[var],
                 cutoff_frequency=cutoff_frequency,
                 fs_x=fs_x,
