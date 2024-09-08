@@ -18,17 +18,17 @@ def padding_fourier(
 
     if isinstance(dimension, str) and isinstance(padding, (int, tuple)):
         padding_dictionary = {dimension: padding}
-        # da = da.assign_coords({dimension : da[dimension]})
+        da = da.assign_coords({dimension : da[dimension]})
         # limit = {dimension : slice(da[dimension].min(), da[dimension].max())}
 
     elif isinstance(dimension, (list, tuple)) and isinstance(padding, int):
         padding_dictionary = {dim: padding for dim in dimension}
-        # da = da.assign_coords({dim : da[dim] for dim in dimension})
+        da = da.assign_coords({dim : da[dim] for dim in dimension})
         # limit = {dim : slice(da[dim].min(),da[dim].max()) for dim in dimension}
 
     elif isinstance(dimension, (list, tuple)) and isinstance(padding, (list, tuple)):
         padding_dictionary = {dim: pad for (dim, pad) in zip(dimension, padding)}
-        # da = da.assign_coords({dim : da[dim] for dim in dimension})
+        da = da.assign_coords({dim : da[dim] for dim in dimension})
         # limit = {dim : slice(da[dim].min(),da[dim].max()) for dim in dimension}
 
     padding_dictionary_freq = {"freq_" + k: v for k, v in padding_dictionary.items()}

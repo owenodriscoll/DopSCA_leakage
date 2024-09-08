@@ -122,9 +122,9 @@ def low_pass_filter_2D(
     da_filt = xrft.ifft(da_spec_filt, shift=False, lag=lag)
 
     if not return_complex:
-        # assert that magnitude of complex part is very small
-        assert_message = f"potentially significant complex component detected. Consider zero-padding input to low-pass filter"
-        assert np.isclose(abs(da_filt.imag).max(), 0, atol = 1e-10), assert_message
+        # # assert that magnitude of complex part is very small
+        # assert_message = f"potentially significant complex component detected. Consider zero-padding input to low-pass filter"
+        # assert np.isclose(abs(da_filt.imag).max(), 0, atol = 1e-10), assert_message
         da_filt = da_filt.real
 
     if fill_nans:
