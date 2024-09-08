@@ -122,7 +122,11 @@ def low_pass_filter_2D(
     da_filt = xrft.ifft(da_spec_filt, shift=False, lag=lag)
 
     if not return_complex:
+        # assert that magnitude of complex part is very small
+        assert_message = f"potentially significant complex component detected. Consider zero-padding input to low-pass filter"
+        assert np.isclose(abs(da_filt.imag).max(), 0, atol = 1e-10), assert_message
         da_filt = da_filt.real
+
     if fill_nans:
         da_filt = da_filt.where(condition_fill.data, np.nan)
 
@@ -131,6 +135,12 @@ def low_pass_filter_2D(
     dimensions = [*da.sizes]
     for dimension in dimensions:
         da_filt[dimension] = da[dimension]
+
+    if da.name == None:
+        new_name = None
+    else:
+        new_name = f"{da.name} low-pass filtered"
+    da_filt = da_filt.rename(new_name)
 
     return da_filt
 
