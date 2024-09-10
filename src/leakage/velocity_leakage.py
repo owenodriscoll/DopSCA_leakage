@@ -350,11 +350,12 @@ class S1DopplerLeakage:
         self.window_size = np.round(self.az_footprint_cutoff / self.grid_spacing).astype("int")
         self.stride_elements = np.round(self.vx_sat / self.PRF / self.grid_spacing).astype("int")
 
-
         self.data = self.data.chunk({dim_filter: 1, dim_original:"auto"})
         self.data = self.data.rolling({dim_filter: self.window_size}, center=True).construct({dim_filter:dim_window}, stride=self.stride_elements)
+        
         stride = (self.data[dim_filter][-1] - self.data[dim_filter][0]) / (self.data[dim_filter].sizes[dim_filter]-1)
         self.stride = float(stride.data)
+        
         slow_time = da.arange(self.data[dim_filter].sizes[dim_filter]) * self.stride
         
         self.data = self.data.assign_coords(
@@ -612,6 +613,8 @@ class S1DopplerLeakage:
         )
 
         # after padding in the Fourier domain the output is complex, complex part should be negligible
+        self.da_V_pp = da_V_pp
+        self.pad = pad
         V_pp_c = padding_fourier(da_V_pp, padding=(pad, pad), dimension="dim_0")
 
         # since iid noise, we can clip time domain to correct dimensions without affecting statistics

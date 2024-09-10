@@ -1,6 +1,6 @@
 import xarray as xr
 import numpy as np
-from .utils import is_chunked_checker
+from .utils import is_chunked_checker, add_delayed_assert
 import xrft
 
 
@@ -18,23 +18,24 @@ def padding_fourier(
 
     if isinstance(dimension, str) and isinstance(padding, (int, tuple)):
         padding_dictionary = {dimension: padding}
-        da = da.assign_coords({dimension : da[dimension]})
+        da = da.assign_coords({dimension: da[dimension]})
         # limit = {dimension : slice(da[dimension].min(), da[dimension].max())}
 
     elif isinstance(dimension, (list, tuple)) and isinstance(padding, int):
         padding_dictionary = {dim: padding for dim in dimension}
-        da = da.assign_coords({dim : da[dim] for dim in dimension})
+        da = da.assign_coords({dim: da[dim] for dim in dimension})
         # limit = {dim : slice(da[dim].min(),da[dim].max()) for dim in dimension}
 
     elif isinstance(dimension, (list, tuple)) and isinstance(padding, (list, tuple)):
         padding_dictionary = {dim: pad for (dim, pad) in zip(dimension, padding)}
-        da = da.assign_coords({dim : da[dim] for dim in dimension})
+        da = da.assign_coords({dim: da[dim] for dim in dimension})
         # limit = {dim : slice(da[dim].min(),da[dim].max()) for dim in dimension}
 
     padding_dictionary_freq = {"freq_" + k: v for k, v in padding_dictionary.items()}
-    
+
     # pre-pad data in spatial domain
-    da_pad = xrft.pad(da,
+    da_pad = xrft.pad(
+        da,
         pad_width=padding_dictionary,
     )
 
@@ -61,12 +62,19 @@ def padding_fourier(
     # remove padding in spatial domain
     # da_padded = da_padded.sel(limit)
 
-    assert_message = ("Average complex component after zero-pad interpolation exceeds 0.1% of real component. "
-                      "Input may be too discontinuous, consider prior zero padding in spatial domain")
-    ratio_4_assert = abs(da_padded.imag).max() / abs(da_padded.real).mean()
+    assert_message = (
+        "Average complex component after zero-pad interpolation exceeds 1% of real component. "
+        "Input may be too discontinuous, consider prior zero padding in spatial domain"
+    )
+    ratio_4_assert = lambda x: (abs(x.imag).max() / abs(x.real).mean()) < 0.01
 
     if not np.iscomplex(da).any():
-        assert np.isclose(ratio_4_assert, 0, atol = 1e-4), assert_message 
+        da_padded = add_delayed_assert(
+            x=da_padded,
+            condition_function=ratio_4_assert,
+            error_msg=assert_message,
+            raise_error=False,
+        )
 
     return da_padded
 

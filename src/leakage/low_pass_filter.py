@@ -1,9 +1,9 @@
 import xrft
 import xarray as xr
 import numpy as np
+from typing import Callable
 from scipy.signal import firwin
-
-from .utils import is_chunked_checker
+from .utils import is_chunked_checker, add_delayed_assert
 
 
 def design_low_pass_filter_2D(
@@ -122,9 +122,14 @@ def low_pass_filter_2D(
     da_filt = xrft.ifft(da_spec_filt, shift=False, lag=lag)
 
     if not return_complex:
-        # # assert that magnitude of complex part is very small
-        # assert_message = f"potentially significant complex component detected. Consider zero-padding input to low-pass filter"
-        # assert np.isclose(abs(da_filt.imag).max(), 0, atol = 1e-10), assert_message
+        # assert that magnitude of complex part is very small
+        assert_message = f"potentially significant complex component detected. Consider zero-padding input to low-pass filter"
+        assert_condition = lambda x: np.isclose(abs(x.imag).max(), 0, atol=1e-10)
+        da_filt = add_delayed_assert(
+            x=da_filt,
+            condition_function=assert_condition,
+            error_msg=assert_message,
+        )
         da_filt = da_filt.real
 
     if fill_nans:
