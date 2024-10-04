@@ -30,7 +30,7 @@ dependencies = [
   "cmcrameri",
   "ipykernel",
   "joblib",
-  "cdsapi"
+  "cdsapi>=0.7.2"
 ]
 
 [project.optional-dependencies]
