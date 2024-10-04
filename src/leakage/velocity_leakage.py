@@ -132,7 +132,7 @@ class S1DopplerLeakage:
 
     filename: Union[str, list]
     f0: float = 5.4e9  # Hoogeboom et al,. (2018)
-    z0: float = 824e3  # 823-848 km e.g. in Fois et al,. (2015)
+    z0: float = 823e3  # 823-848 km e.g. in Fois et al,. (2015)
     antenna_length: float = 3.2  # for mid beam, Fois et al,. (2015)
     antenna_height: float = 0.3  # for mid beam, Fois et al,. (2015)
     antenna_elements: int = 4  # for mid beam, Rostan et al,. (2016)
