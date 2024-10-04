@@ -35,7 +35,6 @@ def era5_wind_area(year, month, day, time, latmax, lonmin, latmin, lonmax, filen
             "product_type": "reanalysis",
             "format": "netcdf",
             "variable": [
-                "temperature",
                 "10m_u_component_of_wind",
                 "10m_v_component_of_wind",
             ],
@@ -216,12 +215,23 @@ def querry_era5(
         )
         era5 = xr.open_dataset(era5_filename)
 
-    era5_subset = era5.sel(
-        time=np.datetime64(date_rounded, "ns"),
-        longitude=convert_to_0_360(longitudes),
-        latitude=latitudes,
-        method="nearest",
-    )
+    # newer CDS API yielda different changes "time" -> "valid_time"
+    try: 
+        era5_subset = era5.sel(
+            time=np.datetime64(date_rounded, "ns"),
+            longitude=convert_to_0_360(longitudes),
+            latitude=latitudes,
+            method
+            ="nearest",
+        )
+    except:
+        era5_subset = era5.sel(
+            valid_time=np.datetime64(date_rounded, "ns"),
+            longitude=convert_to_0_360(longitudes),
+            latitude=latitudes,
+            method
+            ="nearest",
+        )
 
     # ERA5 data is subsampled
     # this should not affect resolution much as, for example, the resolution of 1/4 deg ERA5 is approx 50km,
