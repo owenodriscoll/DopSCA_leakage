@@ -1,26 +1,34 @@
 ![Continuous Integration build in GitHub Actions](https://github.com/owenodriscoll/DopSCA/actions/workflows/main.yaml/badge.svg?branch=main)
 
-Create a cdsapi account to access ERA5 wind-field information
+## Data preparation
+1. Create an ECMWF account to access the ERA5 CDS API (for setup go [here](https://cds.climate.copernicus.eu/how-to-api)). This is needed for wind-field information.
 
-Downloaded and unzip at least three sequential Sentinel-1 IW GRD's in VV/VH pol as the edges are lost during beam pattern integration. 
+2. Sentinel-1 data can be downloaded [here](https://browser.dataspace.copernicus.eu/). Recommended to download and unzip at least three sequential Sentinel-1 IW GRD's in VV+VH pol as the edges are lost during beam-pattern integration. 
 
+## Environment preparation
 Create a new environment and activate
 
-`conda create -n ENV_NAME python==3.12`
-
-`conda activate ENV_NAME`
+```bash
+conda create -n ENV_NAME python==3.12
+conda activate ENV_NAME
+```
 
 Conda install GDAL (not enabled from pip)
-
-`conda install GDAL`
+```bash
+conda install GDAL
+```
 
 Clone environment
-
-`git clone git@github.com:owenodriscoll/DopSCA.git`
+```bash
+git clone git@github.com:owenodriscoll/DopSCA.git
+```
 
 Navigate to installed directory and pip install other requirements
-
-`pip install -e .`
+```bash
+pip install -e .
+```
 
 For development and testing
-`pip install -e .[test]`
+```bash
+pip install -e .[test]
+```
