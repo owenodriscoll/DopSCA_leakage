@@ -63,8 +63,8 @@ def padding_fourier(
     # da_padded = da_padded.sel(limit)
 
     assert_message = (
-        "Average complex component after zero-pad interpolation exceeds 1% of real component. "
-        "Input may be too discontinuous, consider prior zero padding in spatial domain"
+        "Undesired complex component after zero-pad interpolation. "
+        "Input may be too discontinuous. Recommended to investigate interpolation output"
     )
     ratio_4_assert = lambda x: (abs(x.imag).max() / abs(x.real).mean()) < 0.01
 

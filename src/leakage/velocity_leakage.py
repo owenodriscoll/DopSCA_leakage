@@ -615,18 +615,18 @@ class S1DopplerLeakage:
         # after padding in the Fourier domain the output is complex, complex part should be negligible
         self.da_V_pp = da_V_pp
         self.pad = pad
-        V_pp_c = padding_fourier(da_V_pp, padding=(pad, pad), dimension="dim_0")
+        self.V_pp_c = padding_fourier(da_V_pp, padding=(pad, pad), dimension="dim_0")
 
         # since iid noise, we can clip time domain to correct dimensions without affecting statistics
-        V_pp = V_pp_c[: shape_ref[0], : shape_ref[1]]
-        self.V_pp_c = V_pp_c
+        V_pp = self.V_pp_c[: shape_ref[0], : shape_ref[1]]
+        V_pp = V_pp.real # NOTE if complex part is not negligible this will slightly underestimate pulsepair noise
 
         self.data["V_pp"] = (
             xr.zeros_like(self.data["V_leakage_pulse_rg"]) + V_pp.data
         ) / np.sin(self.data["elevation_angle_scat"])
         self.data["V_sigma"] = (
-            self.data["V_leakage_pulse_rg"] + self.data["V_pp"].real
-        )  # complex part should be negligible anyways
+            self.data["V_leakage_pulse_rg"] + self.data["V_pp"]
+        )  
 
         # ------- re-interpolate to higher sampling to maintain uniform ground samples -------
         self.data = self.data.interp(grg=grg_for_safekeeping, method=self._interpolator)
