@@ -19,7 +19,7 @@ dependencies = [
   "dask",
   "xarray",
   "drama",
-  "stereoid",
+  "stereoid==0.4",
   "xrft",
   "numpy",
   "pandas",

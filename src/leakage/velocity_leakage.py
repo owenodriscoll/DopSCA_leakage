@@ -8,7 +8,7 @@ import bottleneck  # implicitely loaded somewhere
 import numpy as np
 import xarray as xr
 import dask.array as da
-from stereoid.oceans.GMF.cmod5n import cmod5n_inverse, cmod5n_forward
+from stereoid.oceans.forward_models.cmod5n import cmod5n_inverse, cmod5n_forward
 from drama.performance.sar.antenna_patterns import sinc_bp, phased_array
 from dataclasses import dataclass
 
