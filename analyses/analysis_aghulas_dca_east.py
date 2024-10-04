@@ -2,7 +2,8 @@ import glob
 import numpy as np
 import xarray as xr
 import argparse
-from leakage.velocity_leakage import S1DopplerLeakage, add_dca_to_leakage_class
+from leakage.velocity_leakage import S1DopplerLeakage
+from leakage.add_dca import add_dca_to_leakage_class
 
 func_rmse = lambda x, rounding=3:  np.round(np.sqrt(np.mean(x**2)).values*1, rounding)
 func_rmse_xr = lambda x, rounding=3:  np.round(np.sqrt(np.mean(x**2)), rounding)
