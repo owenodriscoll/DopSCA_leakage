@@ -15,13 +15,13 @@ classifiers = [
 
 
 dependencies = [
-  "xsar[S1] == 2024.4.*",
+  "xsar[S1]",
   "dask",
   "xarray",
   "drama",
   "stereoid==0.4",
-  "xrft",
-  "numpy",
+  "xrft==1.0.1",
+  "numpy==1.26.*",
   "pandas",
   "scipy",
   "matplotlib",
