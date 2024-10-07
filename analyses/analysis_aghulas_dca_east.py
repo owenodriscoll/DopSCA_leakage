@@ -11,6 +11,7 @@ func_rmse_xr = lambda x, rounding=3:  np.round(np.sqrt(np.mean(x**2)), rounding)
 
 # data_dir = "/Users/opodriscoll/Documents/Data/Sentinel1/IW/"
 # data_dir_dca = "/Users/opodriscoll/Documents/Data/Sentinel1/DCA/"
+# data_dir_era5 = "/Users/opodriscoll/Documents/Scripts/DopSCA/data/leakage/era5_winds/"
 # save_dir = '../../data/leakage/temp/aghulas_east_v3.nc'
 
 
@@ -21,14 +22,16 @@ if __name__ == "__main__":
 
     # Define command-line arguments
     parser.add_argument("data_dir", type=str, help="directory containing Sentinel-1 GRD data folders")
-    parser.add_argument("data_dir_dca", type=int, help= "directory containing corresponding DCA data folders")
-    parser.add_argument("save_dir", type=int, help= "directory to save results")
+    parser.add_argument("data_dir_dca", type=str, help= "directory containing corresponding DCA data folders")
+    parser.add_argument("data_dir_era5", type=str, help= "directory where ERA5 data will be stored/loaded")
+    parser.add_argument("save_dir", type=str, help= "directory to save results")
 
     # Parse the arguments
     args = parser.parse_args()
 
     data_dir = args.data_dir
     data_dir_dca = args.data_dir_dca
+    data_dir_era5 = args.data_dir_era5
     save_dir = args.save_dir
 
     scenarios = [
@@ -49,7 +52,7 @@ if __name__ == "__main__":
             filename=files,
             f0 = 5_400_000_000,
             z0 = 823_000,
-            era5_directory='../../data/leakage/era5_winds/',
+            era5_directory=data_dir_era5,
             resolution_product=50_000,
             az_footprint_cutoff=80_000,
             vx_sat=6_800,
