@@ -46,6 +46,7 @@ if __name__ == "__main__":
 
     results = []
     for i, scenario in enumerate(scenarios):
+        print(scenario)
         files = glob.glob(f"{data_dir+scenario}/*.SAFE")
 
         test = S1DopplerLeakage(
