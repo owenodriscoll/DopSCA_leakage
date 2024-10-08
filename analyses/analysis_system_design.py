@@ -41,7 +41,7 @@ if __name__ == "__main__":
         print(scenario, flush=True)
 
         scenario_name = scenario[:scenario.find('_')].lower()
-        save_dir_scenario = save_dir + f"{scenario_name}_design_param_{version}.nc"
+        save_dir_file = save_dir + f"{scenario_name}_design_param_{version}.nc"
 
         results_w_speck = []
         for i, antenna_length_multiplier in enumerate(antenna_length_multipliers):
@@ -120,4 +120,4 @@ if __name__ == "__main__":
         ds_res = xr.concat([ds_res_speck, ds_res_no_speck], dim = 'speckle')
         ds_res = ds_res.assign_coords(la = ('la', 2.87 * antenna_length_multipliers))
 
-        ds_res.to_netcdf(save_dir)
+        ds_res.to_netcdf(save_dir_file)
