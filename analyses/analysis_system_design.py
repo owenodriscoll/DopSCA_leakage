@@ -121,3 +121,15 @@ if __name__ == "__main__":
         ds_res = ds_res.assign_coords(la = ('la', 2.87 * antenna_length_multipliers))
 
         ds_res.to_netcdf(save_dir_file)
+
+        # clear memory 
+        del results_w_speck
+        del results_w_o_speck
+        del samples
+        del residuals
+        del backscatters
+        del noise
+        del ds_temp
+        del ds_res_speck
+        del ds_res_no_speck
+        del ds_res
