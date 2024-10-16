@@ -745,6 +745,9 @@ class S1DopplerLeakage:
         self_copy.S1_file[var_nrcs] = ([var_azi, var_grg], new_nrcs)
         self_copy.S1_file[var_inc] = ([var_azi, var_grg], new_inc)
 
+        self.S1_file[var_nrcs + "_scat"] = self_copy.S1_file[var_nrcs]
+        self.S1_file[var_inc + "_scat"] = self_copy.S1_file[var_inc]
+
         # define names of variables to consider and return
         data_to_return = [
             "doppler_pulse_rg",
