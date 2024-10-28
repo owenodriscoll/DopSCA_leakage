@@ -1,9 +1,5 @@
 import warnings
-import xsar  # implicitely loaded somewhere
-import dask  # implicitely loaded somewhere
 import copy
-import pyproj # implicitely loaded somewhere
-import xrft # implicitely loaded somewhere
 import bottleneck  # implicitely loaded somewhere
 import numpy as np
 import xarray as xr
