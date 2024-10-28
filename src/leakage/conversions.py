@@ -47,7 +47,7 @@ def dop2vel(Doppler, Lambda, angle_incidence, angle_azimuth, degrees=True):
     angle_incidence: float,
         incidence angle, in of wave with surface, degrees or radians
     angle_azimuth: float,
-        azimuthal angle with respect to boresight (0 for right looking system)
+        azimuthal angle (90 for right looking system)
     degrees: bool,
         whether input angles are provided in degrees or radians
 
@@ -78,7 +78,7 @@ def vel2dop(velocity, Lambda, angle_incidence, angle_azimuth, degrees=True):
     angle_incidence: float,
         incidence angle, in of wave with surface, degrees or radians
     angle_azimuth: float,
-        azimuthal angle with respect to boresight (0 for right looking system)
+        azimuthal angle (90 for right looking system)
     degrees: bool,
         whether input angles are provided in degrees or radians
 

@@ -32,15 +32,14 @@ def normalize_angle(angle):
 
 def angular_difference(a, b):
     """
-    Calculate the angular difference between angles a and b.
+    Calculate the angular difference between angles a and b in degrees.
     """
-    normalized_a = normalize_angle(a + 90)  # add 90 degrees as radar is right looking
-    normalized_b = normalize_angle(
-        b + 180
-    )  # add 180 degrees to go from blowing towards, to blowing from
+    # make sure they are between -180 and 180 degrees
+    normalized_a = normalize_angle(a)
+    normalized_b = normalize_angle(b)
 
     # Calculate the angular difference
-    diff = (normalized_b - normalized_a + 180) % 360 - 180
+    diff = normalize_angle(normalized_b - normalized_a)
 
     return diff
 

@@ -317,7 +317,9 @@ def wdir_from_era5(era5_data, corner_coords):
     ground_dir, _, _ = geodesic.inv(*corner_coords)
 
     # compute directional difference between satelite and era5 wind direction
-    wdir_wrt_sensor = angular_difference(ground_dir, wdir_era5)
+    sensor_dir = ground_dir + 90 # add 90 degrees because radar is right looking
+    wdir_era5_from = wdir_era5 + 180 # add 180 degrees to go from blowing towards, to blowing from
+    wdir_wrt_sensor = angular_difference(sensor_dir, wdir_era5_from)
 
     return wdir_wrt_sensor
 

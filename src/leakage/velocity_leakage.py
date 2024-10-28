@@ -46,9 +46,9 @@ from typing import Callable, Union, List, Dict, Any
         # NOTE beam mask construction
         # NOTE velocity variance calculation from coherence loss
         # NOTE slant to ground range
-    # NOTE range cell migration already corrected for
+    # NOTE Assumes range cell migration already corrected for
     # NOTE neglecting any Earth-rotation effects. 
-    # NOTE same beam pattern on transmit and receive
+    # NOTE Assumes same beam pattern on transmit and receive
     # NOTE Assumes square Sentinel-1 pixels. The following processes rely on square pixels
         # NOTE ERA5 data is resampled to Sentinel-1 grid size and then smoothed
         # NOTE calculation of az_mask_pixels_cutoff
