@@ -15,7 +15,7 @@ scenarios = [
 'Scotland_20231109',
 ]
 
-version = 'v0'
+version = 'v1'
 
 antenna_length_multipliers = 10**(np.log10(2)*np.arange(0, 4))
 N = len(antenna_length_multipliers)
@@ -106,9 +106,9 @@ if __name__ == "__main__":
 
         samples = results_w_speck + results_w_o_speck 
 
-        residuals = [result.data.V_leakage_pulse_rg_subscene - result.data.V_leakage_pulse_rg_subscene_inverted for result in samples]
+        residuals = [result.data.V_leakage_pulse_rg - result.data.V_leakage_pulse_rg_inverted for result in samples]
         backscatters = [result.data.nrcs_scat for result in samples]
-        noise = [result.data.V_sigma_subscene - result.data.V_leakage_pulse_rg_subscene_inverted for result in samples]
+        noise = [result.data.V_sigma - result.data.V_leakage_pulse_rg_inverted for result in samples]
 
         ds_temp = xr.Dataset()
         ds_temp['residual'] = xr.concat(residuals, dim = 'la')

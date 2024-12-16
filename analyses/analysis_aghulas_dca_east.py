@@ -82,11 +82,11 @@ if __name__ == "__main__":
 
     samples = results
 
-    residuals = [result.data.V_leakage_pulse_rg_subscene - result.data.V_leakage_pulse_rg_subscene_inverted for result in samples]
+    residuals = [result.data.V_leakage_pulse_rg- result.data.V_leakage_pulse_rg_inverted for result in samples]
     backscatters = [result.data.nrcs_scat for result in samples]
-    signals = [result.data.V_dca_pulse_rg_subscene for result in samples]
-    currents =  [result.data.V_dca_pulse_rg_subscene - result.data.V_wb_pulse_rg_subscene for result in samples]
-    noise = [result.data.V_sigma_subscene - result.data.V_leakage_pulse_rg_subscene_inverted for result in samples]
+    signals = [result.data.V_dca_pulse_rg for result in samples]
+    currents =  [result.data.V_dca_pulse_rg - result.data.V_wb_pulse_rg for result in samples]
+    noise = [result.data.V_sigma - result.data.V_leakage_pulse_rg_inverted for result in samples]
 
     ds_res = xr.Dataset()
     ds_res['residual'] = xr.concat(residuals, dim = 'time')
