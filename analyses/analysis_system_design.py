@@ -106,11 +106,15 @@ if __name__ == "__main__":
 
         samples = results_w_speck + results_w_o_speck 
 
+        leakage = [result.data.V_leakage_pulse_rg for result in samples]
+        leakage_est = [result.data.V_leakage_pulse_rg_inverted for result in samples]
         residuals = [result.data.V_leakage_pulse_rg - result.data.V_leakage_pulse_rg_inverted for result in samples]
         backscatters = [result.data.nrcs_scat for result in samples]
         noise = [result.data.V_sigma - result.data.V_leakage_pulse_rg_inverted for result in samples]
 
         ds_temp = xr.Dataset()
+        ds_temp['leakage'] = xr.concat(leakage, dim = 'time')
+        ds_temp['leakage_est'] = xr.concat(leakage_est, dim = 'time')
         ds_temp['residual'] = xr.concat(residuals, dim = 'la')
         ds_temp['nrcs'] = xr.concat(backscatters, dim = 'la')
         ds_temp['noise'] = xr.concat(noise, dim = 'la')
@@ -123,6 +127,8 @@ if __name__ == "__main__":
         ds_res.to_netcdf(save_dir_file)
 
         # clear memory 
+        del leakage
+        del leakage_est
         del results_w_speck
         del results_w_o_speck
         del samples
