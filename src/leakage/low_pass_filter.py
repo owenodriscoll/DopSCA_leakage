@@ -55,6 +55,108 @@ def design_low_pass_filter_2D(
 
     return filter_response
 
+def low_pass_filter(
+    da: xr.DataArray,
+    cutoff_frequency: float,
+    fs: float,
+    window: str = "hann",
+    fill_nans: bool = False,
+    return_complex: bool = False,
+) -> xr.DataArray:
+    """
+    Low pass filtering an xarray dataArray in the Fourier domain using xrft, scipy.signal.windows and np.fft
+
+    Input:
+    ------
+    da: xr.DataArray,
+        Data to be filtered
+    cutoff_frequency: float,
+        threshold frequnecy, greater frequencies are filtered out
+    fs: float,
+        sampling along first DataArray dimension
+    window: str,
+        window string from scipy.signal.get_window
+    fill_nans: bool,
+        Whether to replace non-finite values (e.g. nans and inifinities) with 0
+    return_complex: bool,
+        Whether the imaginary part should be returned or not
+
+    Returns:
+    --------
+    da_filt: xr.DataArray,
+        The real part of low-pass filtered data
+    """
+
+    if fill_nans:
+        condition_fill = np.isfinite(da)
+        da_filled = xr.where(condition_fill, da, 0)
+    else:
+        da_filled = da
+
+    dim = da_filled.dims[0]
+
+    # data is rechunked because fourier transform cannot be performed over chunked dimension
+    # shift set to false to prevent clashing fftshifts between np.fft and xrft.fft
+    if is_chunked_checker(da_filled):
+        da_spec = xrft.fft(
+            da_filled.chunk({**da_filled.sizes}),
+            dim = dim,
+            chunks_to_segmentsbool=False,
+            shift=False,
+        )
+    else:
+        da_spec = xrft.fft(
+            da_filled, 
+            dim = dim,
+            shift=False)
+
+    # design time-domain filter
+    numtaps = da_filled.sizes[dim]
+    filter_response = firwin(
+        numtaps=numtaps,
+        cutoff=cutoff_frequency,
+        fs=fs,
+        pass_zero=True,
+        window=window,
+    )
+
+    # convert window to fourier domain and multiply with spectrum, then convert back (i.e. same as convolving filter with input image)
+    filter_response_fourier = np.fft.fft(filter_response)
+    dim_freq = "freq_"+dim
+    da_spec_filt = da_spec * filter_response_fourier[:, None]
+    lag = da_spec_filt[dim_freq].attrs.get("direct_lag", 0.0)
+    da_filt = xrft.ifft(da_spec_filt, 
+                        dim=dim_freq,
+                        shift=False, 
+                        lag=lag)
+
+    if not return_complex:
+        # assert that magnitude of complex part is very small
+        assert_message = f"potentially significant complex component detected. Consider zero-padding input to low-pass filter"
+        assert_condition = lambda x: np.isclose(abs(x.imag).max(), 0, atol=1e-10)
+        da_filt = add_delayed_assert(
+            x=da_filt,
+            condition_function=assert_condition,
+            error_msg=assert_message,
+        )
+        da_filt = da_filt.real
+
+    if fill_nans:
+        da_filt = da_filt.where(condition_fill.data, np.nan)
+
+    # ensure dimensions after fft match those of input (sometimes rounding errors can occur)
+    # NOTE with shift set to False and no manual fftshift the coordinates appear incorrectly not to match (but is good, I hope)
+    dimensions = [*da.sizes]
+    for dimension in dimensions:
+        da_filt[dimension] = da[dimension]
+
+    if da.name == None:
+        new_name = None
+    else:
+        new_name = f"{da.name} low-pass filtered"
+    da_filt = da_filt.rename(new_name)
+
+    return da_filt
 
 def low_pass_filter_2D(
     da: xr.DataArray,
