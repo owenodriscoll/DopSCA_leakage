@@ -113,8 +113,8 @@ if __name__ == "__main__":
         noise = [result.data.V_sigma - result.data.V_leakage_pulse_rg_inverted for result in samples]
 
         ds_temp = xr.Dataset()
-        ds_temp['leakage'] = xr.concat(leakage, dim = 'time')
-        ds_temp['leakage_est'] = xr.concat(leakage_est, dim = 'time')
+        ds_temp['leakage'] = xr.concat(leakage, dim = 'la')
+        ds_temp['leakage_est'] = xr.concat(leakage_est, dim = 'la')
         ds_temp['residual'] = xr.concat(residuals, dim = 'la')
         ds_temp['nrcs'] = xr.concat(backscatters, dim = 'la')
         ds_temp['noise'] = xr.concat(noise, dim = 'la')
