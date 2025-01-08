@@ -43,4 +43,5 @@ jobs:
       if: runner.os != 'Windows'
       run: |
         pip install --upgrade pip
+        pip install --upgrade setuptools
         pip install -e . --use-pep517
