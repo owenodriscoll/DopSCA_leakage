@@ -34,4 +34,4 @@ pip install -e .[test]
 ```
 
 ## Minimal example
-For a minimal example near the Azores, see [the example](https://github.com/owenodriscoll/DopSCA/blob/main/analysis/example.ipynb) in the analyses folder.
+For a minimal example near the Azores, see [the example](https://github.com/owenodriscoll/DopSCA/blob/main/analyses/example.ipynb) in the analyses folder.
