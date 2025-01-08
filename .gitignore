@@ -11,3 +11,6 @@ data_processed
 *.egg-info
 .vscode
 .netrc
+analyses/*.ipynb
+*.ipynb_checkpoints
+!analyses/example.ipynb

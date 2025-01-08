@@ -1,6 +1,6 @@
 [project]
 name = "dopsca"
-dynamic = ["version"]
+version = "0.1.0"
 authors = [
   { name="Owen O'D"},
 ]
@@ -15,13 +15,13 @@ classifiers = [
 
 
 dependencies = [
-  "xsar[S1] == 2024.4.*",
-  "dask",
-  "xarray",
+  "xsar[S1]==2024.4.24",
+  "dask==2024.4.1",
+  "xarray==2024.3.0",
   "drama",
-  "stereoid",
-  "xrft",
-  "numpy",
+  "stereoid==0.4",
+  "xrft==1.0.1",
+  "numpy==1.26.4",
   "pandas",
   "scipy",
   "matplotlib",
@@ -35,6 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ['pytest']
+dev = ['black[jupyter]']
 
 
 [project.urls]
