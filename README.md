@@ -1,9 +1,9 @@
 ![Continuous Integration build in GitHub Actions](https://github.com/owenodriscoll/DopSCA/actions/workflows/main.yaml/badge.svg?branch=main)
 
 ## Data preparation
-1. Create an ECMWF account to access the ERA5 CDS API (for setup go [here](https://cds.climate.copernicus.eu/how-to-api)). This is needed for wind-field information.
+1. Create an ECMWF account to access the ERA5 CDS API (for setup go to [cds.climate.copernicus.eu](https://cds.climate.copernicus.eu/how-to-api)). This is needed for wind-field information.
 
-2. Sentinel-1 data can be downloaded [here](https://browser.dataspace.copernicus.eu/). Recommended to download and unzip at least three sequential Sentinel-1 IW GRD's in VV+VH pol as the edges are lost during beam-pattern integration. 
+2. Sentinel-1 data can be downloaded at [browser.dataspace.copernicus.eu](https://browser.dataspace.copernicus.eu/). Recommended to download and unzip at least three sequential Sentinel-1 IW GRD's in VV+VH pol as the edges are lost during beam-pattern integration. 
 
 ## Environment preparation
 Create a new environment and activate
@@ -32,3 +32,6 @@ For development and testing
 ```bash
 pip install -e .[test]
 ```
+
+## Minimal example
+For a minimal example near the Azores, see [this example](https://github.com/owenodriscoll/DopSCA/analysis/example.ipynb)
