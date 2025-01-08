@@ -5,12 +5,12 @@ import xrft
 
 
 def padding_fourier(
-    da: xr.DataArray, padding: int | tuple, dimension: str, pad_value=complex(0, 0)
+    da: xr.DataArray, padding: int | tuple, dimension: str, pad_value=complex(0, 0), warn_discontinuity: bool=False,
 ) -> xr.DataArray:
     """
     Interpolate data by zero-padding in Fourier domain along dimension
 
-    NOTE if input DataArray is discontinuous it may need prior zero-padding in spatial domain
+    NOTE if input DataArray is too discontinuous, padding in frequency domain might add erroneous imaginary component
 
     """
     if is_chunked_checker(da):
@@ -68,7 +68,7 @@ def padding_fourier(
     )
     ratio_4_assert = lambda x: (abs(x.imag).max() / abs(x.real).mean()) < 0.01
 
-    if not np.iscomplex(da).any():
+    if (not np.iscomplex(da).any()) & warn_discontinuity:
         da_padded = add_delayed_assert(
             x=da_padded,
             condition_function=ratio_4_assert,
