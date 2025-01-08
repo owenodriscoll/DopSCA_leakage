@@ -15,13 +15,13 @@ classifiers = [
 
 
 dependencies = [
-  "xsar[S1]",
-  "dask",
-  "xarray",
+  "xsar[S1]==2024.4.24",
+  "dask==2024.4.1",
+  "xarray==2024.3.0",
   "drama",
   "stereoid==0.4",
   "xrft==1.0.1",
-  "numpy==1.26.*",
+  "numpy==1.26.4",
   "pandas",
   "scipy",
   "matplotlib",
@@ -30,7 +30,7 @@ dependencies = [
   "cmcrameri",
   "ipykernel",
   "joblib",
-  "cdsapi>=0.7.2"
+  "cdsapi"
 ]
 
 [project.optional-dependencies]
