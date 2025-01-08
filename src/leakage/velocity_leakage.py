@@ -723,7 +723,7 @@ class S1DopplerLeakage:
 
         # interpolate estimated scatterometer data back to S1 grid size
         slow_time_upsamp = np.linspace(
-            self.data.slow_time[0], self.data.slow_time[-1], idx_end - idx_start
+            self.data.slow_time[0].values, self.data.slow_time[-1].values, idx_end - idx_start
         )
         nrcs_scat_upsamp = nrcs_scat_speckle.T.interp(slow_time=slow_time_upsamp)
         inc_scat_upsamp = np.degrees(self.data["elevation_angle_scat"]).T.interp(
