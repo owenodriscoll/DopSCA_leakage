@@ -5,6 +5,13 @@ on:
       - main
       - dev_CI/CD
       - owenodriscoll-patch-1
+  pull_request:
+    branches:
+      - main
+    types: 
+      - opened
+      - synchronize
+      - reopened
 jobs:
   build:
     runs-on: ${{ matrix.os }}
