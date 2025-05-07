@@ -36,12 +36,18 @@ jobs:
         auto-activate-base: false
         miniconda-version: "latest"
     - name: Install GDAL from Conda
-      run: conda install gdal
+      run: |
+        conda activate myenv
+        conda install gdal
     - name: Install PyPi packages Windows 
       if: runner.os == 'Windows'
-      run: pip install -e .
+      run: |
+        conda activate myenv
+        pip install .
     - name: Install PyPi packages Linux & MacOS 
       if: runner.os != 'Windows'
       run: |
+        conda activate myenv
         pip install --upgrade pip
-        pip install -e .
+        git config --global fetch.timeout 480
+        pip install .
