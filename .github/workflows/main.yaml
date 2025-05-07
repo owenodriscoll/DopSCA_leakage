@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+      - development
       - dev_CI/CD
       - owenodriscoll-patch-1
   pull_request:
