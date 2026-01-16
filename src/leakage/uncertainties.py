@@ -8,6 +8,36 @@ def decorrelation(tau, T):
     return np.exp(-((tau / T) ** 2))  #
 
 
+def speckle_coherence(T_pp, T_corr_surface, T_corr_Doppler):
+    """
+    Calculates speckle coherence between two subpulses due to satellite and surface motion
+
+    NOTE assumes broadside geometry (non-squinted)
+
+    Parameters
+    ----------
+    T_pp : scaler
+        Intra pulse pair time separation
+    T_corr_surface : scaler
+        Decorrelation time of ocean surface at scales of radio wavelength of interest
+    T_corr_Doppler : scaler
+        Decorrelation time of velocities within resolution cell as a result of satellite motion during pulse-pair transmit
+
+    Returns
+    -------
+    Scaler of coherence
+
+    """
+
+    gamma_velocity = decorrelation(
+        T_pp, T_corr_Doppler
+    )  # eq 6 & 7 Rodriguez (2018), NOTE not valid for squint NOTE assumes Gaussian beam pattern
+    gamma_temporal = decorrelation(T_pp, T_corr_surface)
+
+    gamma = gamma_temporal * gamma_velocity
+
+    return gamma
+
 def pulse_pair_coherence(T_pp, T_corr_surface, T_corr_Doppler, SNR):
     """
     Calculates the Pulse pair velocity standard deviation within a resolution cell due to coherence loss
@@ -77,14 +107,14 @@ def generate_complex_speckle(noise_shape: tuple, random_state: int = 42):
     noise_imag = np.random.randn(*noise_shape)
     speckle = np.array(
         [complex(a, b) for a, b in zip(noise_real.ravel(), noise_imag.ravel())]
-    )
+    ) / np.sqrt(2)
 
     return speckle.reshape(noise_shape)
 
 
 def speckle_intensity(complex_speckle):
-    """Intensity is obtained by (abs(speckle_complex)**2)/2, which has a mean and variance of 1"""
-    return abs(complex_speckle) ** 2 / 2
+    """Intensity is obtained by (abs(speckle_complex)**2), which has a mean and variance of 1"""
+    return abs(complex_speckle) ** 2
 
 
 def phase_error_generator(
