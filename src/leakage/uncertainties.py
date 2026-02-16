@@ -167,3 +167,56 @@ def phase_error_generator(
         samples = samples.reshape(target_shape)
 
     return samples
+
+
+def phase_error_generator_2D(
+    gamma,
+    theta: float = 0,
+    n_bins: int = 20001,
+    random_state: Union[float, int, types.NoneType] = None,
+):
+    """
+    generates a nd-fields from samples drawn from several 1-Look phase-difference probability density functions (pdf) from equation 19 in:
+    Jong-Sen Lee et al., (1994) "Statistics of phase difference and product magnitude of multi-look processed Gaussian signals"
+
+    Input
+    -----
+    gamma: float,
+        coherence of phase difference
+    theta: float,
+        phase offset, in radian
+    n_bins: int,
+        Number of discrete bins to generate pdf
+    random_state: Union[int, float, types.NoneType],
+        Fixes random state if float or int is provided
+
+    Returns
+    -------
+    samples:
+        Array with a phase error realisation of phase uncertainty
+    """
+
+    target_shape = gamma.shape
+    _gamma = gamma.flatten()
+
+    if type(random_state) is not type(None):
+        random.seed(random_state)    
+
+    psi = np.linspace(-np.pi, np.pi, n_bins)
+    beta = np.outer(_gamma, np.cos(psi - theta))
+    pdf = (
+        (1 - _gamma**2)[:, None] * (np.sqrt(1 - beta**2) + beta * (np.pi - (np.arccos(beta))))
+    ) / (2 * np.pi * (1 - beta**2) ** (1.5))
+
+    samples = np.zeros_like(_gamma)
+    for i in range(len(_gamma)):
+
+        # this account for the fact that some input gamma's might be np.nan themselves
+        try:
+            samples[i] = np.array(random.choices(population=psi, weights=pdf[i], k=1))
+        except Exception as e:
+            
+            # print(i, e)
+            samples[i] = np.nan
+
+    return samples.reshape(target_shape)
