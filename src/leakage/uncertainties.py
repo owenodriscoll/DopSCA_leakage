@@ -71,6 +71,12 @@ def pulse_pair_coherence(T_pp, T_corr_surface, T_corr_Doppler, SNR):
 
     return gamma
 
+def calculate_coherence(s1, s2):
+    return np.sum(s1 * np.conjugate(s2)) / (
+        np.sqrt(np.sum(s1 * np.conjugate(s1))) * 
+        np.sqrt(np.sum(s2 * np.conjugate(s2)))
+        )
+
 
 def phase_uncertainty_rodriguez2018(gamma, N_L=1):
     """
@@ -110,6 +116,9 @@ def generate_complex_speckle(noise_shape: tuple, random_state: int = 42):
     ) / np.sqrt(2)
 
     return speckle.reshape(noise_shape)
+
+def generate_correlated_complex_speckle(original_speckle, correlation, random_state):
+    return original_speckle * correlation + np.sqrt(1 - correlation**2) * generate_complex_speckle(original_speckle.shape, random_state=random_state) 
 
 
 def speckle_intensity(complex_speckle):
