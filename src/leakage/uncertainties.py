@@ -1,8 +1,11 @@
 import random
 import types
 import numpy as np
+import xarray as xr
+
 from typing import Union
 
+from leakage.frequency_domain_padding import padding_fourier, compute_padding_1D
 
 def decorrelation(tau, T):
     return np.exp(-((tau / T) ** 2))  #
@@ -117,6 +120,7 @@ def generate_complex_speckle(noise_shape: tuple, random_state: int = 42):
 
     return speckle.reshape(noise_shape)
 
+
 def generate_correlated_complex_speckle(original_speckle, correlation, random_state):
     return original_speckle * correlation + np.sqrt(1 - correlation**2) * generate_complex_speckle(original_speckle.shape, random_state=random_state) 
 
@@ -229,3 +233,36 @@ def phase_error_generator_2D(
             samples[i] = np.nan
 
     return samples.reshape(target_shape)
+
+
+def band_limited_noise(da, dims, uncertainty_resolution, random_state = 42):
+
+    np.random.seed(random_state)
+
+    new_dims = {}
+    paddings = {}
+    for dim in dims:
+        new_spacing = np.arange(
+            da[dim].min(), 
+            da[dim].max(),
+            uncertainty_resolution)
+
+        pad = compute_padding_1D(
+            length_desired=da.sizes[dim],
+            length_current=len(new_spacing),
+        )
+
+        new_dims[dim] = new_spacing
+        paddings[dim] = pad
+
+    reference = xr.ones_like(da.interp(new_dims, method='linear'))
+    uncertainty_reference = np.random.randn(*reference.shape) * reference
+
+    # drop unnecessary coords
+    coords_to_drop = (set(list(uncertainty_reference.coords)) - set(uncertainty_reference.dims))
+    uncertainty = uncertainty_reference.drop_vars(coords_to_drop)
+
+    for dim in dims:
+        uncertainty = padding_fourier(uncertainty, padding=(paddings[dim], paddings[dim]), dimension=dim)
+
+    return uncertainty
