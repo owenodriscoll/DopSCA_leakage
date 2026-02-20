@@ -1,4 +1,6 @@
 import numpy as np
+import xarray as xr
+from typing import Union
 
 
 def dB(x):
@@ -7,6 +9,36 @@ def dB(x):
 
 def convert_to_0_360(longitude):
     return (longitude + 360) % 360
+
+
+def normalize_angle(angle):
+    """
+    Normalize the angle to be between -180 and 180 degrees.
+    """
+    return (angle + 180) % 360 - 180
+
+
+def angular_difference(a, b):
+    """
+    Calculate the angular difference between angles a and b in degrees.
+    """
+    # make sure they are between -180 and 180 degrees
+    normalized_a = normalize_angle(a)
+    normalized_b = normalize_angle(b)
+
+    # Calculate the angular difference
+    diff = normalize_angle(normalized_b - normalized_a)
+    return diff
+
+
+def dir_from_u_v(u: Union[int, float, np.ndarray, xr.DataArray], v: Union[int, float, np.ndarray, xr.DataArray]) -> Union[int, float, np.ndarray, xr.DataArray]:
+    """Computes a direction from u (x-axis) and v (y-axis) components"""
+    return np.arctan2(u, v)
+
+
+def magnitude_from_u_v(u: Union[int, float, np.ndarray, xr.DataArray], v: Union[int, float, np.ndarray, xr.DataArray]) -> Union[int, float, np.ndarray, xr.DataArray]:
+    """Computes magnitude from u (x-axis) and v (y-axis) components"""
+    return np.sqrt(u*u+ v*v)
 
 
 def angular_projection_factor(inc_original, inc_new=90) -> float:
