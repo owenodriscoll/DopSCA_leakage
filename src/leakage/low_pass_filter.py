@@ -166,6 +166,7 @@ def low_pass_filter_2D(
     window: str = "hann",
     fill_nans: bool = False,
     return_complex: bool = False,
+    crop_edges: bool = False,
 ) -> xr.DataArray:
     """
     Low pass filtering an xarray dataArray in the Fourier domain using xrft, scipy.signal.windows and np.fft
@@ -188,11 +189,13 @@ def low_pass_filter_2D(
         Whether to replace non-finite values (e.g. nans and inifinities) with 0
     return_complex: bool,
         Whether the imaginary part should be returned or not
+    crop_edges: bool,
+        Whether to crop edges by spatial wavelength corresponding to cutoff_frequency to remove FFT cyclic artifacts. Defaults to False
 
     Returns:
     --------
     da_filt: xr.DataArray,
-        The real part of low-pass filtered data
+        The real part of low-pass filtered data (possibly cropped if crop_edges=True)
     """
 
     if fill_nans:
@@ -249,6 +252,19 @@ def low_pass_filter_2D(
         new_name = f"{da.name} low-pass filtered"
     da_filt = da_filt.rename(new_name)
 
+    # Crop edges if requested to remove FFT cyclic boundary artifacts
+    if crop_edges:
+        # Calculate wavelength in grid points for each dimension (factor of 2 accounts for Nyquist)
+        wavelength_x = fs_x / (2 * cutoff_frequency)
+        wavelength_y = fs_y / (2 * cutoff_frequency)
+        crop_x = int(np.ceil(wavelength_x))
+        crop_y = int(np.ceil(wavelength_y))
+        
+        # Get dimension names
+        dims = list(da.dims)
+        slices = {dims[0]: slice(crop_x, -crop_x), dims[1]: slice(crop_y, -crop_y)}
+        da_filt = da_filt.isel(slices)
+
     return da_filt
 
 
@@ -260,6 +276,7 @@ def low_pass_filter_2D_dataset(
     window: str = "hann",
     fill_nans: bool = False,
     return_complex: bool = False,
+    crop_edges: bool = False,
 ) -> xr.Dataset:
     """
     Wrapper of low_pass_filter_2D for each dataArray in dataset
@@ -282,11 +299,14 @@ def low_pass_filter_2D_dataset(
         Whether to replace non-finite values (e.g. nans and inifinities) with 0
     return_complex: bool,
         Whether the imaginary part should be returned or not
+    crop_edges: bool,
+        Whether to crop edges by spatial wavelength corresponding to cutoff_frequency to remove FFT cyclic artifacts. Defaults to False
+        This is especially useful if the signal to be filtered is non-periodic and has large values at the edges.
 
     Returns:
     --------
     ds_filt: xr.Dataset,
-        The real part of low-pass filtered data
+        The real part of low-pass filtered data (possibly cropped if crop_edges=True)
     """
 
     ds_filt = xr.Dataset(
@@ -299,6 +319,7 @@ def low_pass_filter_2D_dataset(
                 window=window,
                 fill_nans=fill_nans,
                 return_complex=return_complex,
+                crop_edges=crop_edges,
             )
             for var in ds
         }
